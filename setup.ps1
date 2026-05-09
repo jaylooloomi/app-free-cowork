@@ -106,7 +106,7 @@ Write-Step 4 5 "安裝 Ollama 雲端模型"
 $pyScript = "$env:TEMP\pull_ollama_cloud_model.py"
 Write-Info "下載模型安裝腳本..."
 try {
-    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jaylooloomi/free-cloud-models/main/pull_ollama_cloud_model.py" -OutFile $pyScript -UseBasicParsing
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jaylooloomi/free-claude-code/main/pull_ollama_cloud_model.py" -OutFile $pyScript -UseBasicParsing
     Write-Info "執行模型安裝（這可能需要數分鐘，請耐心等候）..."
     python $pyScript
     Write-OK "雲端模型安裝完成"
