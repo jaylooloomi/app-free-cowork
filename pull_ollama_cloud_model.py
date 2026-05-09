@@ -23,9 +23,27 @@ def ensure_dependencies():
         print(f"[!] 安裝瀏覽器核心時發生錯誤，嘗試強制安裝: {e}")
         subprocess.run(install_cmd, check=True)
 
+def get_installed_models():
+    """取得目前 ollama 已安裝的模型清單"""
+    try:
+        result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
+        installed = set()
+        for line in result.stdout.splitlines()[1:]:  # 跳過標題行
+            parts = line.split()
+            if parts:
+                installed.add(parts[0].lower())
+        return installed
+    except Exception:
+        return set()
+
 def scrape_and_pull():
     from playwright.sync_api import sync_playwright
-    
+
+    print("[*] 讀取已安裝的模型清單...")
+    installed_models = get_installed_models()
+    if installed_models:
+        print(f"[*] 已安裝 {len(installed_models)} 個模型，掃描時將自動跳過。")
+
     with sync_playwright() as p:
         print("[*] 啟動自動化引擎...")
         browser = p.chromium.launch(headless=True)
@@ -34,6 +52,7 @@ def scrape_and_pull():
 
         page_num = 1
         total_installed = 0
+        total_skipped = 0
 
         while True:
             url = f"https://ollama.com/search?c=cloud&page={page_num}"
@@ -62,12 +81,19 @@ def scrape_and_pull():
                     
                     if "cloud" in content:
                         model_full = f"{base_name}:cloud"
+
+                        if model_full.lower() in installed_models:
+                            print(f"--- [跳過] {model_full} 已安裝 ---")
+                            total_skipped += 1
+                            found_in_page += 1
+                            continue
+
                         print(f"--- [偵測到] {model_full} ---")
-                        
                         if run_ollama_pull(model_full):
+                            installed_models.add(model_full.lower())
                             found_in_page += 1
                             total_installed += 1
-                        
+
                         time.sleep(1)
 
                 if found_in_page == 0:
@@ -81,7 +107,7 @@ def scrape_and_pull():
                 break
 
         browser.close()
-        print(f"\n[任務完成] 總共處理了 {total_installed} 個雲端模型。")
+        print(f"\n[任務完成] 新安裝 {total_installed} 個，跳過 {total_skipped} 個已安裝的雲端模型。")
 
 def run_ollama_pull(model_name):
     try:
