@@ -139,22 +139,8 @@ def scrape_and_pull():
 
 def run_ollama_pull(model_name):
     try:
-        # stdout 讓使用者看到進度，stderr 捕捉來偵測錯誤
-        process = subprocess.run(
-            ["ollama", "pull", model_name],
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        # return code 不是 0 → 失敗
-        if process.returncode != 0:
-            if process.stderr:
-                print(process.stderr.strip())
-            return False
-        # return code 是 0 但 stderr 含 error 關鍵字 → 也算失敗
-        if process.stderr and "error" in process.stderr.lower():
-            print(process.stderr.strip())
-            return False
-        return True
+        process = subprocess.run(["ollama", "pull", model_name])
+        return process.returncode == 0
     except FileNotFoundError:
         print("[危險] 系統找不到 'ollama' 指令，請先安裝 Ollama 並加入 PATH。")
         return False
