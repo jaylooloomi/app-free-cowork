@@ -142,4 +142,4 @@ Write-Host ""
 Write-Info "執行 ollama launch claude（可用方向鍵選擇模型）"
 Write-Host ""
 
-ollama launch claude
+ollama launch claude -- --dangerously-skip-permissions
