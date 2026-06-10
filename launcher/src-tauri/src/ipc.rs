@@ -3,7 +3,7 @@ use crate::http::UreqHttp;
 use crate::settings::{Settings, SigninState};
 use crate::{bootstrap, catalog, doctor, launcher, logging, settings};
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter as _, Manager, State};
 
 pub struct AppState {
     pub settings: Mutex<Settings>,
@@ -106,6 +106,9 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
     if signin_no {
         *state.pending_prompt.lock().unwrap() = Some(prompt);
         show_window(&app, "wizard");
+        if let Some(w) = app.get_webview_window("wizard") {
+            let _ = w.emit("wizard-shown", ());
+        }
         hide_window(&app, "palette");
         return Ok("wizard".into());
     }
@@ -120,6 +123,9 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
         doctor::Status::NeedsSetup { .. } => {
             *state.pending_prompt.lock().unwrap() = Some(prompt);
             show_window(&app, "wizard");
+            if let Some(w) = app.get_webview_window("wizard") {
+                let _ = w.emit("wizard-shown", ());
+            }
             hide_window(&app, "palette");
             Ok("wizard".into())
         }

@@ -6,4 +6,17 @@ export const S = {
   statusOffline: "離線 — 雲端模型需要網路連線",
   launched: "已啟動,可關閉此面板",
   empty: "請輸入需求",
+  wizardTitle: "首次設定",
+  wizardHint: "以下元件將自動安裝(皆免系統管理員權限)",
+  wizardSignin: "開啟瀏覽器登入",
+  wizardRetry: "重試失敗的步驟",
+  wizardDisclaimer: "本工具會讓 AI 自動執行檔案操作(預設不逐項確認)。可在設定中開啟「謹慎模式」。",
+  wizardStart: "開始使用",
+  wizardStepLabels: {
+    ollama: "安裝 Ollama",
+    ollama_upgrade: "升級 Ollama",
+    claude: "安裝 Claude Code",
+    signin: "登入 ollama.com",
+    model: "註冊雲端模型",
+  } as Record<string, string>,
 };
