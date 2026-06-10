@@ -143,6 +143,26 @@ mod tests {
     }
 
     #[test]
+    fn background_spawn_redirects_output_and_reports_exit_code() {
+        use std::sync::mpsc;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        let spec = LaunchSpec {
+            program: "cmd".into(),
+            args: vec!["/c".into(), "echo out-line & echo err-line 1>&2 & exit 3".into()],
+            cwd: dir.path().to_path_buf(),
+            background: true,
+        };
+        let (tx, rx) = mpsc::channel();
+        spawn(&spec, log.clone(), Some(Box::new(move |code, path| { tx.send((code, path)).unwrap(); }))).unwrap();
+        let (code, path) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+        assert_eq!(code, 3);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("out-line"), "log missing stdout; got: {content}");
+        assert!(content.contains("err-line"), "log missing stderr; got: {content}");
+    }
+
+    #[test]
     fn working_dir_defaults_to_home() {
         let spec = build_launch_spec("p", &Settings::default(), "m");
         assert_eq!(spec.cwd, dirs::home_dir().unwrap());
