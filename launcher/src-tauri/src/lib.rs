@@ -4,6 +4,8 @@ pub mod http;
 pub mod settings;
 pub mod catalog;
 pub mod doctor;
+pub mod logging;
+pub mod launcher;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
