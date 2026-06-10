@@ -2,6 +2,7 @@ pub mod version;
 pub mod command;
 pub mod http;
 pub mod settings;
+pub mod catalog;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
