@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "launcher",
+  "productName": "Free Claude Code",
   "version": "0.1.0",
-  "identifier": "com.王鼎傑.launcher",
+  "identifier": "com.jaylooloomi.free-claude-code",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,32 @@
   "app": {
     "windows": [
       {
-        "title": "launcher",
-        "width": 800,
-        "height": 600
+        "label": "palette",
+        "title": "Free Claude Code",
+        "width": 640,
+        "height": 168,
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "center": false
+      },
+      {
+        "label": "wizard",
+        "title": "Free Claude Code 首次設定",
+        "width": 560,
+        "height": 540,
+        "visible": false,
+        "resizable": false
+      },
+      {
+        "label": "settings",
+        "title": "Free Claude Code 設定",
+        "width": 560,
+        "height": 600,
+        "visible": false,
+        "resizable": false
       }
     ],
     "security": {
