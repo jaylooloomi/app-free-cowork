@@ -1,12 +1,138 @@
-<!-- 空殼:Task 11 實作 -->
-<main class="shell">稍後實作</main>
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { api, type Settings } from "./api";
+  import { S } from "./strings";
+
+  let s: Settings | null = $state(null);
+  let models: string[] = $state([]);
+  let saved = $state(false);
+  let error = $state("");
+  let savedTimer: ReturnType<typeof setTimeout> | undefined;
+
+  async function load() {
+    s = await api.getSettings();
+    try {
+      models = await api.listCloudModels();
+    } catch {
+      models = []; // 離線時仍可編輯其他設定
+    }
+    if (s && !models.includes(s.model)) models = [s.model, ...models];
+  }
+
+  onMount(() => {
+    load();
+    return () => clearTimeout(savedTimer);
+  });
+
+  async function save() {
+    if (!s) return;
+    error = "";
+    saved = false;
+    try {
+      // 失敗(例:快捷鍵註冊失敗)→ 後端已回滾,顯示訊息,欄位保持可編輯重試
+      await api.saveSettings($state.snapshot(s));
+      saved = true;
+      clearTimeout(savedTimer);
+      savedTimer = setTimeout(() => (saved = false), 1500);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+</script>
+
+{#if s}
+  <main class="settings">
+    <h1>{S.settingsTitle}</h1>
+    <label
+      >{S.settingsHotkey}
+      <input bind:value={s.hotkey} placeholder={S.settingsHotkeyPlaceholder} />
+      <small>{S.settingsHotkeyHint}</small></label
+    >
+    <label
+      >{S.settingsModel}
+      <select bind:value={s.model}>
+        {#each models as m (m)}<option value={m}>{m}</option>{/each}
+      </select></label
+    >
+    <label class="row"><input type="checkbox" bind:checked={s.cautious_mode} /> {S.settingsCautious}</label>
+    <label class="row"><input type="checkbox" bind:checked={s.background_mode} /> {S.settingsBackground}</label>
+    <label
+      >{S.settingsWorkingDir}
+      <input bind:value={s.working_dir} placeholder={S.settingsWorkingDirPlaceholder} /></label
+    >
+    <label class="row"><input type="checkbox" bind:checked={s.autostart} /> {S.settingsAutostart}</label>
+    <div class="actions">
+      <button class="primary" onclick={save}>{S.settingsSave}</button>
+      <button onclick={() => api.openLogs()}>{S.settingsOpenLogs}</button>
+      {#if saved}<span class="ok">{S.settingsSaved}</span>{/if}
+    </div>
+    {#if error}<div class="err">{error}</div>{/if}
+  </main>
+{/if}
 
 <style>
-  .shell {
+  .settings {
+    padding: 24px;
+    color: #eee;
     display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  h1 {
+    font-size: 20px;
+    margin: 0;
+  }
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+  }
+  label.row {
+    flex-direction: row;
     align-items: center;
-    justify-content: center;
-    height: 100vh;
-    color: #999;
+    gap: 8px;
+  }
+  input:not([type="checkbox"]),
+  select {
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid #444;
+    background: #1e1e1e;
+    color: #eee;
+    outline: none;
+  }
+  input:not([type="checkbox"]):focus,
+  select:focus {
+    border-color: #7aa2f7;
+  }
+  small {
+    color: #888;
+  }
+  .actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  button {
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid #444;
+    background: #2a2a2a;
+    color: #eee;
+    cursor: pointer;
+  }
+  button.primary {
+    background: #7aa2f7;
+    color: #111;
+    border: none;
+  }
+  .ok {
+    color: #9ece6a;
+  }
+  .err {
+    color: #f7768e;
+    font-size: 12px;
+    white-space: pre-wrap;
   }
 </style>
