@@ -97,6 +97,10 @@ git add launcher && git commit -m "Scaffold Tauri v2 launcher project with svelt
 
 ### Task 2: version.rs + command.rs + http.rs(基礎層)
 
+> **修訂(e4903c2,審查後)**:本節下方原始碼有兩個已修正的 bug,實際程式碼以 repo 為準 —
+> (1) `SystemRunner::run` 必須先用背景執行緒 drain stdout/stderr 再 `wait_timeout`(否則 >64KB 輸出會 pipe 死鎖),timeout 路徑 `kill()` 後要 `wait()` 收屍,輸出用 `from_utf8_lossy` 解碼(zh-TW cp950);
+> (2) `Http` trait **沒有 `get_bytes`**,改為 `download_to_file(&self, url, dest: &Path, timeout) -> Result<(), String>`(串流寫盤,ureq 3.x `read_to_vec` 有 10MB 上限且大檔不該進記憶體);`get` 明確設 64MB 上限。後續任務一律使用 `download_to_file`。
+
 **Files:**
 - Create: `launcher/src-tauri/src/version.rs`、`launcher/src-tauri/src/command.rs`、`launcher/src-tauri/src/http.rs`
 - Modify: `launcher/src-tauri/src/lib.rs`(加 `pub mod`)
@@ -933,13 +937,11 @@ pub fn install_ollama(runner: &dyn Runner, http: &dyn Http, temp_dir: PathBuf) -
         if let Ok(ref o) = r { if o.ok() { refresh_path(); return result(r, "安裝 Ollama (winget)"); } }
     }
     // fallback:直接下載官方安裝器靜默安裝(Inno Setup → /VERYSILENT)
-    match http.get_bytes(OLLAMA_SETUP_URL, Duration::from_secs(600)) {
+    // 注意:用 download_to_file 串流寫盤(http.rs 已無 get_bytes;安裝器數百 MB 不可進記憶體)
+    let exe = temp_dir.join("OllamaSetup.exe");
+    match http.download_to_file(OLLAMA_SETUP_URL, &exe, Duration::from_secs(600)) {
         Err(e) => StepResult { ok: false, detail: format!("下載 OllamaSetup.exe 失敗: {e}") },
-        Ok(bytes) => {
-            let exe = temp_dir.join("OllamaSetup.exe");
-            if let Err(e) = std::fs::write(&exe, bytes) {
-                return StepResult { ok: false, detail: format!("寫入安裝器失敗: {e}") };
-            }
+        Ok(()) => {
             let r = runner.run(&exe.to_string_lossy(), &["/VERYSILENT","/SP-","/SUPPRESSMSGBOXES"], LONG);
             refresh_path();
             result(r, "安裝 Ollama (直接下載)")
