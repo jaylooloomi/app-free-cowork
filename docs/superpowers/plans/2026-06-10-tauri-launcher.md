@@ -988,6 +988,11 @@ pub fn refresh_path() {
 
 ### Task 8: 後端組裝(lib.rs + ipc.rs + tauri.conf.json)
 
+> **修訂(14d12dc,doctor 審查後)**:本節下方程式碼需配合 doctor 的修正調整 —
+> (1) `Deps` 多兩個欄位:正式環境一律 `serve_poll_ms: 200, serve_attempts: 50`(= 最多等 10s);
+> (2) `full_check` **不再有 pull 副作用**,模型缺失以 `Component::Model` 回報;`wizard_plan` 將 `Model` 映射為 `"model"` 步驟並與無條件附加的 `"model"` 去重(最終清單只出現一次);
+> (3) `submit_prompt`、`get_status`、`wizard_plan` 必須是 **async command** 並以 `tauri::async_runtime::spawn_blocking` 包住 doctor 呼叫 —— 同步 command 在主執行緒執行,quick_check 冷啟動可阻塞 10s 會凍結整個 UI。
+
 **Files:**
 - Create: `launcher/src-tauri/src/ipc.rs`
 - Modify: `launcher/src-tauri/src/lib.rs`、`launcher/src-tauri/src/main.rs`、`launcher/src-tauri/tauri.conf.json`、`launcher/src-tauri/capabilities/default.json`
