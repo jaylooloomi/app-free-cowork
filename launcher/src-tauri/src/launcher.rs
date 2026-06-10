@@ -146,10 +146,9 @@ mod tests {
     fn working_dir_defaults_to_home() {
         let spec = build_launch_spec("p", &Settings::default(), "m");
         assert_eq!(spec.cwd, dirs::home_dir().unwrap());
-        let s = Settings { working_dir: "C:\\Temp".into(), ..Default::default() };
-        assert_eq!(
-            build_launch_spec("p", &s, "m").cwd.to_string_lossy(),
-            "C:\\Temp"
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let configured = dir.path().to_string_lossy().into_owned();
+        let s = Settings { working_dir: configured.clone(), ..Default::default() };
+        assert_eq!(build_launch_spec("p", &s, "m").cwd.to_string_lossy(), configured);
     }
 }
