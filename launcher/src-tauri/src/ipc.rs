@@ -36,17 +36,26 @@ pub fn get_settings(state: State<AppState>) -> Settings {
 }
 
 #[tauri::command]
-pub fn save_settings(app: AppHandle, state: State<AppState>, new_settings: Settings) -> Result<(), String> {
-    let hotkey_changed;
-    {
-        let mut s = state.settings.lock().unwrap();
-        hotkey_changed = s.hotkey != new_settings.hotkey;
-        *s = new_settings.clone();
-        settings::save(&settings::settings_path(), &s).map_err(|e| e.to_string())?;
-    }
+pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_settings: Settings) -> Result<(), String> {
+    // (a) Read old settings clone before any mutation
+    let old_settings = state.settings.lock().unwrap().clone();
+    let hotkey_changed = old_settings.hotkey != new_settings.hotkey;
+
+    // (b) If hotkey changed → try register new; on Err → re-register old (best-effort) and return Err
     if hotkey_changed {
-        crate::register_hotkey(&app, &new_settings.hotkey)?;
+        if let Err(e) = crate::register_hotkey(&app, &new_settings.hotkey) {
+            let _ = crate::register_hotkey(&app, &old_settings.hotkey);
+            return Err(e);
+        }
     }
+
+    // (c) Persist to disk with NEW settings — on Err return Err WITHOUT updating in-memory state
+    settings::save(&settings::settings_path(), &new_settings).map_err(|e| e.to_string())?;
+
+    // (d) Only now overwrite in-memory state
+    *state.settings.lock().unwrap() = new_settings.clone();
+
+    // (e) Sync autostart (always runs when we reach here)
     crate::sync_autostart(&app, new_settings.autostart);
     Ok(())
 }
@@ -116,6 +125,7 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
         }
         doctor::Status::Degraded { reason } => Err(reason),
         doctor::Status::Ready => {
+            *state.pending_prompt.lock().unwrap() = None;
             do_launch(&app, &state, &prompt)?;
             hide_window(&app, "palette");
             Ok("launched".into())
@@ -133,7 +143,7 @@ pub fn do_launch(app: &AppHandle, state: &State<AppState>, prompt: &str) -> Resu
     let spec = launcher::build_launch_spec(prompt, &s, &model);
     let dir = logging::logs_dir();
     logging::rotate(&dir, 30);
-    let log = logging::new_run_log(&dir).map_err(|e| e.to_string())?;
+    let log = logging::new_run_log(&dir).map_err(|e| format!("無法建立記錄檔:{e}"))?;
     let app2 = app.clone();
     let on_done: Option<Box<dyn FnOnce(i32, std::path::PathBuf) + Send>> = if spec.background {
         Some(Box::new(move |code, log_path| {
@@ -147,7 +157,7 @@ pub fn do_launch(app: &AppHandle, state: &State<AppState>, prompt: &str) -> Resu
     } else {
         None
     };
-    launcher::spawn(&spec, log, on_done).map_err(|e| e.to_string())?;
+    launcher::spawn(&spec, log, on_done).map_err(|e| format!("啟動失敗:{e}"))?;
     // 成功啟動過 → 視為已登入(auth 失敗時 runtime 會改回 No)
     let mut st = state.settings.lock().unwrap();
     if st.signin_state == SigninState::Unknown {
@@ -220,7 +230,7 @@ pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<boot
 }
 
 #[tauri::command]
-pub fn wizard_done(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+pub async fn wizard_done(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     hide_window(&app, "wizard");
     let pending = state.pending_prompt.lock().unwrap().take();
     if let Some(p) = pending {

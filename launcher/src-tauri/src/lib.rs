@@ -38,12 +38,17 @@ pub fn sync_autostart(app: &AppHandle, enabled: bool) {
 
 fn show_palette_centered(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("palette") {
+        // Lazy catalog refresh: recover from offline-at-boot
+        if app.state::<ipc::AppState>().catalog_cache.lock().unwrap().is_empty() {
+            refresh_catalog(app.clone());
+        }
         if let Ok(Some(monitor)) = w.current_monitor() {
             let ms = monitor.size();
+            let mp = monitor.position();
             let ws = w.outer_size().unwrap_or(tauri::PhysicalSize { width: 640, height: 168 });
-            let x = (ms.width.saturating_sub(ws.width)) / 2;
-            let y = ms.height / 4;
-            let _ = w.set_position(tauri::PhysicalPosition { x: x as i32, y: y as i32 });
+            let x = mp.x + ((ms.width.saturating_sub(ws.width)) / 2) as i32;
+            let y = mp.y + (ms.height / 4) as i32;
+            let _ = w.set_position(tauri::PhysicalPosition { x, y });
         }
         let _ = w.show();
         let _ = w.set_focus();
@@ -91,7 +96,11 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "結束", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &settings_item, &quit])?;
     TrayIconBuilder::with_id("main")
-        .icon(app.default_window_icon().expect("default window icon").clone())
+        .icon(
+            app.default_window_icon()
+                .ok_or_else(|| tauri::Error::Io(std::io::Error::other("missing default window icon")))?
+                .clone(),
+        )
         .menu(&menu)
         .tooltip("Free Claude Code")
         .on_menu_event(|app, e| match e.id.as_ref() {
