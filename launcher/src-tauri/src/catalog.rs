@@ -20,22 +20,22 @@ pub fn choose_model(configured: &str, catalog: &[String]) -> (String, Option<Str
     if catalog.is_empty() || catalog.iter().any(|c| c == configured) {
         return (configured.to_string(), None);
     }
-    let pick = FALLBACKS.iter().find(|f| catalog.iter().any(|c| c == *f))
+    let pick = FALLBACKS.iter()
+        .find(|f| catalog.iter().any(|c| c == *f))
         .map(|f| f.to_string())
-        .or_else(|| catalog.first().cloned());
-    match pick {
-        Some(p) => {
-            let notice = format!("模型 {configured} 已不在雲端目錄,改用 {p}");
-            (p, Some(notice))
-        }
-        None => (configured.to_string(), None),
-    }
+        .unwrap_or_else(|| catalog[0].clone());
+    let notice = format!("模型 {configured} 已不在雲端目錄,改用 {pick}");
+    (pick, Some(notice))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    const TAGS: &str = r#"{"models":[{"name":"minimax-m2.7"},{"name":"gpt-oss:120b"},{"name":"qwen3-coder-next"}]}"#;
+    const TAGS: &str = r#"{"models":[
+        {"name":"minimax-m2.7","model":"minimax-m2.7","modified_at":"2026-03-01T00:00:00Z","size":0,"details":{"family":"minimax"}},
+        {"name":"gpt-oss:120b"},
+        {"name":"qwen3-coder-next"}
+    ]}"#;
     #[test]
     fn parses_api_tags_to_local_cloud_names() {
         let names = parse_cloud_models(TAGS).unwrap();
