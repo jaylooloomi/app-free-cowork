@@ -14,11 +14,11 @@ pub trait Runner: Send + Sync {
 
 pub struct SystemRunner;
 
-#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 impl Runner for SystemRunner {
     fn run(&self, program: &str, args: &[&str], timeout: Duration) -> io::Result<CmdOutput> {
+        use std::io::Read;
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         use wait_timeout::ChildExt;
@@ -27,14 +27,28 @@ impl Runner for SystemRunner {
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn()?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let t_out = std::thread::spawn(move || {
+            let mut v = Vec::new();
+            if let Some(mut s) = stdout { let _ = s.read_to_end(&mut v); }
+            v
+        });
+        let t_err = std::thread::spawn(move || {
+            let mut v = Vec::new();
+            if let Some(mut s) = stderr { let _ = s.read_to_end(&mut v); }
+            v
+        });
         let status = match child.wait_timeout(timeout)? {
             Some(s) => s,
-            None => { let _ = child.kill(); return Err(io::Error::new(io::ErrorKind::TimedOut, format!("{program} timed out"))); }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait(); // reap; also closes pipes so reader threads finish
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!("{program} timed out")));
+            }
         };
-        let mut out = String::new(); let mut err = String::new();
-        use std::io::Read;
-        if let Some(mut s) = child.stdout.take() { let _ = s.read_to_string(&mut out); }
-        if let Some(mut s) = child.stderr.take() { let _ = s.read_to_string(&mut err); }
+        let out = String::from_utf8_lossy(&t_out.join().unwrap_or_default()).into_owned();
+        let err = String::from_utf8_lossy(&t_err.join().unwrap_or_default()).into_owned();
         Ok(CmdOutput { code: status.code().unwrap_or(-1), stdout: out, stderr: err })
     }
     fn spawn_detached(&self, program: &str, args: &[&str]) -> io::Result<()> {
@@ -47,6 +61,10 @@ impl Runner for SystemRunner {
 }
 
 /// Test double: maps (program + first arg) key to canned output.
+///
+/// **Limitations:** keys are matched on `program + first arg` only; additional
+/// arguments are ignored. Output fields are plain `String` values — binary or
+/// non-UTF-8 output cannot be represented.
 #[derive(Default)]
 pub struct MockRunner {
     pub responses: std::collections::HashMap<String, CmdOutput>,
@@ -91,5 +109,19 @@ mod tests {
         let out = SystemRunner.run("cmd", &["/c", "echo hi"], Duration::from_secs(10)).unwrap();
         assert!(out.ok());
         assert!(out.stdout.contains("hi"));
+    }
+    #[test]
+    fn system_runner_times_out_and_kills() {
+        let start = std::time::Instant::now();
+        let err = SystemRunner.run("powershell", &["-NoProfile", "-Command", "Start-Sleep -Seconds 30"], Duration::from_secs(1)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(10), "should not wait for the child's full 30s");
+    }
+    #[test]
+    fn system_runner_handles_output_larger_than_pipe_buffer() {
+        // 1MB of output must come back fully and not be misreported as timeout
+        let out = SystemRunner.run("powershell", &["-NoProfile", "-Command", "$s = 'x' * 1048576; Write-Output $s"], Duration::from_secs(60)).unwrap();
+        assert!(out.ok());
+        assert!(out.stdout.trim_end().len() >= 1_048_576);
     }
 }
