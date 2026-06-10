@@ -141,21 +141,59 @@ pub fn do_launch(app: &AppHandle, state: &State<AppState>, prompt: &str) -> Resu
         crate::notify(app, &n);
     }
     let spec = launcher::build_launch_spec(prompt, &s, &model);
+    let is_background = spec.background;
     let dir = logging::logs_dir();
     logging::rotate(&dir, 30);
     let log = logging::new_run_log(&dir).map_err(|e| format!("無法建立記錄檔:{e}"))?;
     let app2 = app.clone();
-    let on_done: Option<Box<dyn FnOnce(i32, std::path::PathBuf) + Send>> = if spec.background {
+    // Build on_done closure for both background and foreground (fast-fail) paths.
+    // Background: always called.  Foreground: called only on fast-failure (code != 0, elapsed < 30s).
+    let on_done: Option<Box<dyn FnOnce(i32, std::path::PathBuf) + Send>> = {
         Some(Box::new(move |code, log_path| {
-            let msg = if code == 0 {
-                "任務完成".to_string()
-            } else {
-                format!("任務失敗 (exit {code}),記錄:{}", log_path.display())
-            };
-            crate::notify(&app2, &msg);
+            if code == 0 {
+                // Background success (foreground never calls with code == 0 per spawn contract)
+                crate::notify(&app2, "任務完成");
+                return;
+            }
+            // Read last 4 KB of log for classification
+            let tail = std::fs::read(&log_path)
+                .map(|bytes| {
+                    let start = bytes.len().saturating_sub(4096);
+                    String::from_utf8_lossy(&bytes[start..]).into_owned()
+                })
+                .unwrap_or_default();
+            if !is_background && tail.is_empty() {
+                // Foreground fast-fail with no log output — could be quota or auth
+                let msg = format!(
+                    "啟動後立即失敗 (exit {code}),可能是額度用盡或登入失效"
+                );
+                crate::notify(&app2, &msg);
+                return;
+            }
+            match launcher::classify_failure(&tail) {
+                launcher::FailureKind::Quota => {
+                    crate::notify(&app2, "免費額度已用完,稍後重置(限制綁帳號,換模型無效)");
+                }
+                launcher::FailureKind::Auth => {
+                    // Re-lock sign-in state so next submit_prompt triggers the wizard
+                    let state2 = app2.state::<AppState>();
+                    {
+                        let mut st = state2.settings.lock().unwrap();
+                        st.signin_state = SigninState::No;
+                        let _ = settings::save(&settings::settings_path(), &st);
+                    }
+                    crate::notify(&app2, "需要重新登入 ollama.com,下次啟動會自動引導");
+                }
+                launcher::FailureKind::Other => {
+                    let msg = if code == -1 {
+                        format!("任務異常結束(原因未知),記錄:{}", log_path.display())
+                    } else {
+                        format!("任務失敗 (exit {code}),記錄:{}", log_path.display())
+                    };
+                    crate::notify(&app2, &msg);
+                }
+            }
         }))
-    } else {
-        None
     };
     launcher::spawn(&spec, log, on_done).map_err(|e| format!("啟動失敗:{e}"))?;
     // 成功啟動過 → 視為已登入(auth 失敗時 runtime 會改回 No)

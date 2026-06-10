@@ -41,8 +41,35 @@ const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Foreground: opens a new console window (Win11 routes to Windows Terminal by default).
-/// Background: no window, stdout/stderr written to log file, on_done called when process exits.
+#[derive(Debug, PartialEq)]
+pub enum FailureKind {
+    Quota,
+    Auth,
+    Other,
+}
+
+pub fn classify_failure(log_tail: &str) -> FailureKind {
+    let t = log_tail.to_lowercase();
+    if t.contains("429") || t.contains("usage limit") || t.contains("quota") || t.contains("rate limit") {
+        FailureKind::Quota
+    } else if t.contains("401") || t.contains("unauthorized") || t.contains("not signed in") || t.contains("signin") {
+        FailureKind::Auth
+    } else {
+        FailureKind::Other
+    }
+}
+
+/// Spawn contract:
+/// - Background path: `on_done(code, log_path)` is ALWAYS called when the process exits.
+/// - Foreground path: `on_done(code, log_path)` is called ONLY IF `code != 0` AND the process
+///   exited within 30 seconds of spawn (fast-failure heuristic).  A long-running session that
+///   the user closes manually — including by closing the console window, which on Windows
+///   yields a nonzero exit code — must NOT trigger a notification.  Foreground has no real log;
+///   log_path is passed through so callers can construct messages uniformly (the file will be
+///   empty / non-existent).
+///
+/// Note: A test for the "foreground slow exit → on_done NOT called" case is omitted because it
+/// would require a 30-second wait, making the test suite impractical.
 pub fn spawn(
     spec: &LaunchSpec,
     log_path: PathBuf,
@@ -61,16 +88,22 @@ pub fn spawn(
             .stderr(log2);
         let mut child = cmd.spawn()?;
         std::thread::spawn(move || {
-            let code = child
-                .wait()
-                .map(|s| s.code().unwrap_or(-1))
-                .unwrap_or(-1);
+            let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
             if let Some(f) = on_done {
                 f(code, log_path);
             }
         });
     } else {
-        cmd.creation_flags(CREATE_NEW_CONSOLE).spawn()?;
+        let start = std::time::Instant::now();
+        let mut child = cmd.creation_flags(CREATE_NEW_CONSOLE).spawn()?;
+        std::thread::spawn(move || {
+            let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+            if code != 0 && start.elapsed() < std::time::Duration::from_secs(30) {
+                if let Some(f) = on_done {
+                    f(code, log_path);
+                }
+            }
+        });
     }
     Ok(())
 }
@@ -79,6 +112,36 @@ pub fn spawn(
 mod tests {
     use super::*;
     use crate::settings::Settings;
+
+    #[test]
+    fn classifies_runtime_errors_from_log_tail() {
+        assert_eq!(classify_failure("... 429 Too Many Requests ..."), FailureKind::Quota);
+        assert_eq!(classify_failure("...usage limit reached..."), FailureKind::Quota);
+        assert_eq!(classify_failure("... 401 Unauthorized ..."), FailureKind::Auth);
+        assert_eq!(classify_failure("...not signed in..."), FailureKind::Auth);
+        assert_eq!(classify_failure("random crash"), FailureKind::Other);
+    }
+
+    #[test]
+    fn foreground_fast_fail_calls_on_done() {
+        use std::sync::mpsc;
+        let dir = tempfile::tempdir().unwrap();
+        // log_path for foreground is unused (file may not exist) — pass a path in a writable dir
+        let log = dir.path().join("fg.log");
+        let spec = LaunchSpec {
+            program: "cmd".into(),
+            args: vec!["/c".into(), "exit 7".into()],
+            cwd: dir.path().to_path_buf(),
+            background: false,
+        };
+        let (tx, rx) = mpsc::channel();
+        spawn(&spec, log.clone(), Some(Box::new(move |code, path| {
+            tx.send((code, path)).unwrap();
+        }))).unwrap();
+        // cmd /c exit 7 exits in <<1 second — well within 30s fast-fail window
+        let (code, _path) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+        assert_eq!(code, 7);
+    }
 
     #[test]
     fn foreground_default_args() {
