@@ -45,16 +45,36 @@ impl Http for UreqHttp {
 /// **Limitations:** response bodies are stored as `String` values only — binary
 /// downloads are not representable. `download_to_file` writes the configured
 /// string's bytes to the destination path.
+///
+/// Use `failing_first(url, n)` to make the first `n` calls to `get(url)` return
+/// `Err("simulated failure")` before falling through to the configured response.
 #[derive(Default)]
-pub struct MockHttp { pub responses: std::collections::HashMap<String, Result<String, String>> }
+pub struct MockHttp {
+    pub responses: std::collections::HashMap<String, Result<String, String>>,
+    /// url → remaining failures before the configured response is returned
+    pub fail_first: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+}
 impl MockHttp {
     pub fn on(mut self, url: &str, resp: Result<&str, &str>) -> Self {
         self.responses.insert(url.into(), resp.map(String::from).map_err(String::from));
         self
     }
+    pub fn failing_first(self, url: &str, times: u32) -> Self {
+        self.fail_first.lock().unwrap().insert(url.into(), times);
+        self
+    }
 }
 impl Http for MockHttp {
     fn get(&self, url: &str, _t: Duration) -> Result<String, String> {
+        {
+            let mut ff = self.fail_first.lock().unwrap();
+            if let Some(rem) = ff.get_mut(url) {
+                if *rem > 0 {
+                    *rem -= 1;
+                    return Err("simulated failure".into());
+                }
+            }
+        }
         self.responses.get(url).cloned().unwrap_or_else(|| Err(format!("unmocked {url}")))
     }
     fn download_to_file(&self, url: &str, dest: &std::path::Path, t: Duration) -> Result<(), String> {
