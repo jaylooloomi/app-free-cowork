@@ -106,9 +106,6 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
     if signin_no {
         *state.pending_prompt.lock().unwrap() = Some(prompt);
         show_window(&app, "wizard");
-        if let Some(w) = app.get_webview_window("wizard") {
-            let _ = w.emit("wizard-shown", ());
-        }
         hide_window(&app, "palette");
         return Ok("wizard".into());
     }
@@ -123,9 +120,6 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
         doctor::Status::NeedsSetup { .. } => {
             *state.pending_prompt.lock().unwrap() = Some(prompt);
             show_window(&app, "wizard");
-            if let Some(w) = app.get_webview_window("wizard") {
-                let _ = w.emit("wizard-shown", ());
-            }
             hide_window(&app, "palette");
             Ok("wizard".into())
         }
@@ -237,11 +231,15 @@ pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<boot
 
 #[tauri::command]
 pub async fn wizard_done(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    hide_window(&app, "wizard");
+    // 先嘗試啟動暫存需求;失敗時放回暫存並保留精靈視窗,讓使用者可重試
     let pending = state.pending_prompt.lock().unwrap().take();
     if let Some(p) = pending {
-        do_launch(&app, &state, &p)?;
+        if let Err(e) = do_launch(&app, &state, &p) {
+            *state.pending_prompt.lock().unwrap() = Some(p);
+            return Err(e);
+        }
     }
+    hide_window(&app, "wizard");
     Ok(())
 }
 
@@ -274,6 +272,8 @@ pub fn show_window(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.show();
         let _ = w.set_focus();
+        // 通知前端「視窗真正被顯示」— 視窗啟動時皆為隱藏,前端據此才初始化
+        let _ = w.emit(&format!("{label}-shown"), ());
     }
 }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { api, type Settings } from "./api";
   import { S } from "./strings";
 
@@ -21,7 +22,14 @@
 
   onMount(() => {
     load();
-    return () => clearTimeout(savedTimer);
+    // 視窗只隱藏不關閉 → 每次重新顯示時重新載入,避免顯示過期資料
+    const unlisten = listen("settings-shown", () => {
+      load();
+    });
+    return () => {
+      unlisten.then((f) => f());
+      clearTimeout(savedTimer);
+    };
   });
 
   async function save() {
@@ -29,11 +37,31 @@
     error = "";
     saved = false;
     try {
+      // 只覆寫本頁可編輯的欄位,保留其他流程改動的 history / signin_state
+      const snap = $state.snapshot(s);
+      const fresh = await api.getSettings();
+      const merged = {
+        ...fresh,
+        hotkey: snap.hotkey,
+        model: snap.model,
+        cautious_mode: snap.cautious_mode,
+        background_mode: snap.background_mode,
+        working_dir: snap.working_dir,
+        autostart: snap.autostart,
+      };
       // 失敗(例:快捷鍵註冊失敗)→ 後端已回滾,顯示訊息,欄位保持可編輯重試
-      await api.saveSettings($state.snapshot(s));
+      await api.saveSettings(merged);
       saved = true;
       clearTimeout(savedTimer);
       savedTimer = setTimeout(() => (saved = false), 1500);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function openLogs() {
+    try {
+      await api.openLogs();
     } catch (e) {
       error = String(e);
     }
@@ -63,7 +91,7 @@
     <label class="row"><input type="checkbox" bind:checked={s.autostart} /> {S.settingsAutostart}</label>
     <div class="actions">
       <button class="primary" onclick={save}>{S.settingsSave}</button>
-      <button onclick={() => api.openLogs()}>{S.settingsOpenLogs}</button>
+      <button onclick={openLogs}>{S.settingsOpenLogs}</button>
       {#if saved}<span class="ok">{S.settingsSaved}</span>{/if}
     </div>
     {#if error}<div class="err">{error}</div>{/if}

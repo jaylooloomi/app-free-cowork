@@ -7,6 +7,7 @@ export const S = {
   wizardHint: "以下元件將自動安裝(皆免系統管理員權限)",
   wizardSignin: "開啟瀏覽器登入",
   wizardRetry: "重試失敗的步驟",
+  wizardInitRetry: "重試",
   wizardDisclaimer: "本工具會讓 AI 自動執行檔案操作(預設不逐項確認)。可在設定中開啟「謹慎模式」。",
   wizardStart: "開始使用",
   wizardStepLabels: {
