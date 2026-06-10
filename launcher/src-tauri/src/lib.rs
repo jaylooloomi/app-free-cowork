@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod doctor;
 pub mod logging;
 pub mod launcher;
+pub mod bootstrap;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
