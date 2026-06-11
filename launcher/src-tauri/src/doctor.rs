@@ -26,6 +26,11 @@ pub struct Deps<'a> {
     /// so the healthy path spawns the subprocess at most once per cache lifetime
     /// (production: a process-wide `static`; tests: per-test instance for determinism).
     pub version_cache: &'a std::sync::OnceLock<bool>,
+    /// ensure_server spawn cooldown: at most one `ollama serve` spawn per 30s window.
+    /// Repeated spawns against a wedged port stack zombie processes and make a bad
+    /// environment worse (observed during E2E on 2026-06-11). Production: process-wide
+    /// `static`; tests: per-test instance.
+    pub serve_spawn_gate: &'a std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 pub fn default_claude_paths() -> Vec<PathBuf> {
@@ -64,10 +69,32 @@ fn server_alive(http: &dyn Http) -> bool {
 
 /// Start server if not alive; short-circuit on spawn failure; poll at poll_ms
 /// intervals up to `attempts` times.
+/// The gate limits spawns to one per 30s window: a previous spawn may still be
+/// warming up, and stacking `ollama serve` processes against a wedged port only
+/// makes things worse. Within the cooldown we still poll (the earlier spawn may
+/// come alive), we just don't spawn again.
 /// `pub(crate)` so wizard steps that need a live daemon (signin/model) can reuse it.
-pub(crate) fn ensure_server(runner: &dyn Runner, http: &dyn Http, poll_ms: u64, attempts: u32) -> bool {
+pub(crate) fn ensure_server(
+    runner: &dyn Runner,
+    http: &dyn Http,
+    poll_ms: u64,
+    attempts: u32,
+    gate: &std::sync::Mutex<Option<std::time::Instant>>,
+) -> bool {
     if server_alive(http) { return true; }
-    if runner.spawn_detached("ollama", &["serve"]).is_err() { return false; }
+    let should_spawn = {
+        let mut g = gate.lock().unwrap();
+        match *g {
+            Some(t) if t.elapsed() < Duration::from_secs(30) => false,
+            _ => {
+                *g = Some(std::time::Instant::now());
+                true
+            }
+        }
+    };
+    if should_spawn && runner.spawn_detached("ollama", &["serve"]).is_err() {
+        return false;
+    }
     for _ in 0..attempts {
         std::thread::sleep(Duration::from_millis(poll_ms));
         if server_alive(http) { return true; }
@@ -94,8 +121,8 @@ pub fn full_check(deps: &Deps, model: &str) -> Status {
     if !claude_installed(&deps.claude_paths) { missing.push(Component::ClaudeCode); }
     if !missing.is_empty() { return Status::NeedsSetup { missing }; }
 
-    if !ensure_server(deps.runner, deps.http, deps.serve_poll_ms, deps.serve_attempts) {
-        return Status::Degraded { reason: "Ollama 服務無法啟動".into() };
+    if !ensure_server(deps.runner, deps.http, deps.serve_poll_ms, deps.serve_attempts, deps.serve_spawn_gate) {
+        return Status::Degraded { reason: "Ollama 服務未回應，請重新啟動 Ollama 後再試".into() };
     }
     if !model_registered(deps.runner, model) {
         return Status::NeedsSetup { missing: vec![Component::Model] };
@@ -132,8 +159,8 @@ pub fn quick_check(deps: &Deps) -> Status {
     if !ollama_present || !claude_installed(&deps.claude_paths) {
         return Status::NeedsSetup { missing: vec![] };
     }
-    if !ensure_server(deps.runner, deps.http, deps.serve_poll_ms, deps.serve_attempts) {
-        return Status::Degraded { reason: "Ollama 服務無法啟動".into() };
+    if !ensure_server(deps.runner, deps.http, deps.serve_poll_ms, deps.serve_attempts, deps.serve_spawn_gate) {
+        return Status::Degraded { reason: "Ollama 服務未回應，請重新啟動 Ollama 後再試".into() };
     }
     Status::Ready
 }
@@ -165,7 +192,16 @@ mod tests {
         cache: &'a OnceLock<bool>,
         claude_paths: Vec<PathBuf>,
     ) -> Deps<'a> {
-        Deps { runner: r, http: h, claude_paths, serve_poll_ms: 1, serve_attempts: 2, version_cache: cache }
+        Deps {
+            runner: r,
+            http: h,
+            claude_paths,
+            serve_poll_ms: 1,
+            serve_attempts: 2,
+            version_cache: cache,
+            // fresh gate per Deps (leaked: trivial in tests) → per-test cooldown isolation
+            serve_spawn_gate: Box::leak(Box::new(std::sync::Mutex::new(None))),
+        }
     }
 
     #[test]
@@ -331,7 +367,7 @@ mod tests {
     fn ensure_server_alive_returns_true_without_spawning() {
         let r = MockRunner::default();
         let h = MockHttp::default().on(PING, Ok("{}"));
-        assert!(ensure_server(&r, &h, 1, 2));
+        assert!(ensure_server(&r, &h, 1, 2, &std::sync::Mutex::new(None)));
         assert!(r.calls.lock().unwrap().is_empty(), "alive server must not trigger a spawn");
     }
 
@@ -339,7 +375,7 @@ mod tests {
     fn ensure_server_spawns_and_polls_until_alive() {
         let r = MockRunner::default();
         let h = MockHttp::default().on(PING, Ok("{}")).failing_first(PING, 1);
-        assert!(ensure_server(&r, &h, 1, 2));
+        assert!(ensure_server(&r, &h, 1, 2, &std::sync::Mutex::new(None)));
         assert!(r.calls.lock().unwrap().iter().any(|c| c.starts_with("DETACHED ollama serve")));
     }
 
@@ -347,7 +383,18 @@ mod tests {
     fn ensure_server_returns_false_when_server_never_answers() {
         let r = MockRunner::default();
         let h = MockHttp::default(); // ping always fails
-        assert!(!ensure_server(&r, &h, 1, 2));
+        assert!(!ensure_server(&r, &h, 1, 2, &std::sync::Mutex::new(None)));
         assert!(r.calls.lock().unwrap().iter().any(|c| c.starts_with("DETACHED ollama serve")));
+    }
+
+    #[test]
+    fn ensure_server_spawns_at_most_once_within_cooldown() {
+        let r = MockRunner::default();
+        let h = MockHttp::default(); // ping always fails
+        let gate = std::sync::Mutex::new(None);
+        assert!(!ensure_server(&r, &h, 1, 1, &gate));
+        assert!(!ensure_server(&r, &h, 1, 1, &gate)); // within 30s window
+        let spawns = r.calls.lock().unwrap().iter().filter(|c| c.starts_with("DETACHED")).count();
+        assert_eq!(spawns, 1, "second call within cooldown must not spawn another serve");
     }
 }

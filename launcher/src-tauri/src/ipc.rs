@@ -11,6 +11,10 @@ pub struct AppState {
     pub catalog_cache: Mutex<Vec<String>>,
 }
 
+/// Process-global ensure_server spawn cooldown (shared by doctor checks AND
+/// wizard signin/model steps): at most one `ollama serve` spawn per 30s window.
+static SERVE_SPAWN_GATE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 /// Production doctor deps: real runner/http, default claude paths,
 /// 200ms × 50 attempts (= wait up to 10s for `ollama serve`).
 /// VERSION_CACHE is process-global: the quick_check version gate runs
@@ -24,6 +28,7 @@ fn prod_deps<'a>(runner: &'a SystemRunner, http: &'a UreqHttp) -> doctor::Deps<'
         serve_poll_ms: 200,
         serve_attempts: 50,
         version_cache: &VERSION_CACHE,
+        serve_spawn_gate: &SERVE_SPAWN_GATE,
     }
 }
 
@@ -293,7 +298,7 @@ pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<boot
             // signin/model talk to the local daemon — make sure it is up first
             // (200ms × 50 = wait up to 10s, same as prod_deps).
             "signin" | "model" => {
-                if !doctor::ensure_server(&runner, &http, 200, 50) {
+                if !doctor::ensure_server(&runner, &http, 200, 50, &SERVE_SPAWN_GATE) {
                     bootstrap::StepResult { ok: false, detail: "Ollama 服務尚未就緒,請重試".into() }
                 } else if step2 == "signin" {
                     bootstrap::signin(&runner)
