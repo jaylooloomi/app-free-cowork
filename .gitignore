@@ -1,0 +1,3 @@
+# Windows Sandbox e2e output (mounted read-write by e2e-sandbox.wsb)
+scripts/sandbox-out/*
+!scripts/sandbox-out/.gitkeep

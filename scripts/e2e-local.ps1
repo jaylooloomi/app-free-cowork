@@ -17,6 +17,9 @@
 [CmdletBinding()]
 param(
     [int]$TimeoutMinutes = 10,
+    # minimax-m2.5:cloud is a pre-registered stub kept for test determinism (it is
+    # already in `ollama list` on the dev machine, so the run never blocks on a
+    # pull). The product default shipped to users is minimax-m2.7:cloud.
     [string]$Model = 'minimax-m2.5:cloud'
 )
 
