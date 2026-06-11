@@ -13,13 +13,17 @@ pub struct AppState {
 
 /// Production doctor deps: real runner/http, default claude paths,
 /// 200ms × 50 attempts (= wait up to 10s for `ollama serve`).
+/// VERSION_CACHE is process-global: the quick_check version gate runs
+/// `ollama --version` at most once per app run (tests inject their own).
 fn prod_deps<'a>(runner: &'a SystemRunner, http: &'a UreqHttp) -> doctor::Deps<'a> {
+    static VERSION_CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     doctor::Deps {
         runner,
         http,
         claude_paths: doctor::default_claude_paths(),
         serve_poll_ms: 200,
         serve_attempts: 50,
+        version_cache: &VERSION_CACHE,
     }
 }
 
@@ -64,14 +68,48 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
 pub async fn get_status(state: State<'_, AppState>) -> Result<StatusDto, String> {
     let s = state.settings.lock().unwrap().clone();
     let cat = state.catalog_cache.lock().unwrap().clone();
-    let (model, _) = catalog::choose_model(&s.model, &cat);
-    let status = tauri::async_runtime::spawn_blocking(move || {
+    let cache_empty = cat.is_empty();
+    let (status, probe) = tauri::async_runtime::spawn_blocking(move || {
         let runner = SystemRunner;
         let http = UreqHttp;
-        doctor::quick_check(&prod_deps(&runner, &http))
+        let status = doctor::quick_check(&prod_deps(&runner, &http));
+        // Offline overlay: empty catalog cache means the boot-time refresh failed.
+        // Probe the catalog once (3s): Some(Some(models)) = online, Some(None) = offline.
+        let probe = if cache_empty {
+            use crate::http::Http as _;
+            Some(
+                http.get(catalog::CATALOG_URL, std::time::Duration::from_secs(3))
+                    .ok()
+                    .map(|json| catalog::parse_cloud_models(&json).unwrap_or_default()),
+            )
+        } else {
+            None
+        };
+        (status, probe)
     })
     .await
     .map_err(|e| e.to_string())?;
+    let mut cat = cat;
+    if let Some(fetch) = probe {
+        match fetch {
+            None => {
+                // Cloud catalog unreachable → cloud models cannot work. Be honest.
+                let (model, _) = catalog::choose_model(&s.model, &cat);
+                return Ok(StatusDto {
+                    state: "offline".into(),
+                    model,
+                    detail: "離線 — 雲端模型需要網路連線".into(),
+                });
+            }
+            Some(models) => {
+                if !models.is_empty() {
+                    *state.catalog_cache.lock().unwrap() = models.clone();
+                    cat = models;
+                }
+            }
+        }
+    }
+    let (model, _) = catalog::choose_model(&s.model, &cat);
     Ok(match status {
         doctor::Status::Ready => StatusDto { state: "ready".into(), model, detail: String::new() },
         doctor::Status::NeedsSetup { .. } => StatusDto {
@@ -252,13 +290,39 @@ pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<boot
         match step2.as_str() {
             "ollama" | "ollama_upgrade" => bootstrap::install_ollama(&runner, &http, std::env::temp_dir()),
             "claude" => bootstrap::install_claude(&runner),
-            "signin" => bootstrap::signin(&runner),
-            "model" => bootstrap::register_model(&runner, &model),
+            // signin/model talk to the local daemon — make sure it is up first
+            // (200ms × 50 = wait up to 10s, same as prod_deps).
+            "signin" | "model" => {
+                if !doctor::ensure_server(&runner, &http, 200, 50) {
+                    bootstrap::StepResult { ok: false, detail: "Ollama 服務尚未就緒,請重試".into() }
+                } else if step2 == "signin" {
+                    bootstrap::signin(&runner)
+                } else {
+                    bootstrap::register_model(&runner, &model)
+                }
+            }
             other => bootstrap::StepResult { ok: false, detail: format!("未知步驟 {other}") },
         }
     })
     .await
     .map_err(|e| e.to_string())?;
+    // 安裝精靈記錄(best-effort):%APPDATA%\free-claude-code\logs\wizard.log
+    {
+        let dir = logging::logs_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let line = format!(
+            "[{}] step={} ok={} detail={}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            step,
+            res.ok,
+            res.detail
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("wizard.log"))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    }
     if step == "signin" && res.ok {
         let mut s = state.settings.lock().unwrap();
         s.signin_state = SigninState::Yes;

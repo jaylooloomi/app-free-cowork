@@ -22,6 +22,10 @@ pub struct Deps<'a> {
     /// ensure_server poll: interval ms, attempts (production: 200ms × 50 = 10s; tests: 1ms × 1-3)
     pub serve_poll_ms: u64,
     pub serve_attempts: u32,
+    /// quick_check version gate: set to `true` once `ollama --version` meets the minimum,
+    /// so the healthy path spawns the subprocess at most once per cache lifetime
+    /// (production: a process-wide `static`; tests: per-test instance for determinism).
+    pub version_cache: &'a std::sync::OnceLock<bool>,
 }
 
 pub fn default_claude_paths() -> Vec<PathBuf> {
@@ -60,7 +64,8 @@ fn server_alive(http: &dyn Http) -> bool {
 
 /// Start server if not alive; short-circuit on spawn failure; poll at poll_ms
 /// intervals up to `attempts` times.
-fn ensure_server(runner: &dyn Runner, http: &dyn Http, poll_ms: u64, attempts: u32) -> bool {
+/// `pub(crate)` so wizard steps that need a live daemon (signin/model) can reuse it.
+pub(crate) fn ensure_server(runner: &dyn Runner, http: &dyn Http, poll_ms: u64, attempts: u32) -> bool {
     if server_alive(http) { return true; }
     if runner.spawn_detached("ollama", &["serve"]).is_err() { return false; }
     for _ in 0..attempts {
@@ -98,12 +103,30 @@ pub fn full_check(deps: &Deps, model: &str) -> Status {
     Status::Ready
 }
 
-/// Fast path: ping first, then check file presence. On healthy path (~2–6 ms)
-/// NO subprocess is spawned. If ping fails or claude missing, falls back to
-/// subprocess checks and, if needed, attempts to start the server.
+/// Fast path: ping first, then check file presence. On healthy path the only
+/// subprocess ever spawned is a single `ollama --version` (cached once OK), so
+/// repeat calls are ~2–6 ms with NO subprocess. If ping fails or claude missing,
+/// falls back to subprocess checks and, if needed, attempts to start the server.
 pub fn quick_check(deps: &Deps) -> Status {
     if server_alive(deps.http) && claude_installed(&deps.claude_paths) {
-        return Status::Ready; // healthy path: ~2-6ms, NO subprocess spawned
+        // Version gate: a running-but-too-old Ollama must not report Ready.
+        // Only a positive result is cached — caching `false` would keep returning
+        // NeedsSetup after the wizard upgrades Ollama mid-process.
+        let version_ok = match deps.version_cache.get() {
+            Some(ok) => *ok,
+            None => {
+                let ok = matches!(ollama_state(deps.runner), OllamaState::Ok);
+                if ok {
+                    let _ = deps.version_cache.set(true);
+                }
+                ok
+            }
+        };
+        if version_ok {
+            return Status::Ready; // healthy path: ~2-6ms once the version is cached
+        }
+        // Old (or unidentifiable) Ollama is serving → route to setup/upgrade.
+        return Status::NeedsSetup { missing: vec![] };
     }
     let ollama_present = matches!(ollama_state(deps.runner), OllamaState::Ok | OllamaState::TooOld);
     if !ollama_present || !claude_installed(&deps.claude_paths) {
@@ -121,11 +144,14 @@ mod tests {
     use crate::command::MockRunner;
     use crate::http::MockHttp;
     use std::path::PathBuf;
+    use std::sync::OnceLock;
 
     const PING: &str = "http://127.0.0.1:11434/api/version";
 
-    fn deps<'a>(r: &'a MockRunner, h: &'a MockHttp, claude: bool) -> Deps<'a> {
-        deps_with_path(r, h, if claude {
+    // Each test owns its OnceLock (NOT process-global) so the version gate stays
+    // deterministic when tests share a process.
+    fn deps<'a>(r: &'a MockRunner, h: &'a MockHttp, cache: &'a OnceLock<bool>, claude: bool) -> Deps<'a> {
+        deps_with_path(r, h, cache, if claude {
             // use a real file that exists: the test binary's own crate manifest
             vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")]
         } else {
@@ -133,8 +159,13 @@ mod tests {
         })
     }
 
-    fn deps_with_path<'a>(r: &'a MockRunner, h: &'a MockHttp, claude_paths: Vec<PathBuf>) -> Deps<'a> {
-        Deps { runner: r, http: h, claude_paths, serve_poll_ms: 1, serve_attempts: 2 }
+    fn deps_with_path<'a>(
+        r: &'a MockRunner,
+        h: &'a MockHttp,
+        cache: &'a OnceLock<bool>,
+        claude_paths: Vec<PathBuf>,
+    ) -> Deps<'a> {
+        Deps { runner: r, http: h, claude_paths, serve_poll_ms: 1, serve_attempts: 2, version_cache: cache }
     }
 
     #[test]
@@ -143,14 +174,16 @@ mod tests {
             .on("ollama --version", 0, "ollama version is 0.30.6")
             .on("ollama list", 0, "NAME\nminimax-m2.7:cloud  -  abc");
         let h = MockHttp::default().on(PING, Ok(r#"{"version":"0.30.6"}"#));
-        assert_eq!(full_check(&deps(&r, &h, true), "minimax-m2.7:cloud"), Status::Ready);
+        let cache = OnceLock::new();
+        assert_eq!(full_check(&deps(&r, &h, &cache, true), "minimax-m2.7:cloud"), Status::Ready);
     }
 
     #[test]
     fn needs_setup_lists_missing_components() {
         let r = MockRunner::default(); // ollama not present → run returns Err
         let h = MockHttp::default();
-        match full_check(&deps(&r, &h, false), "m") {
+        let cache = OnceLock::new();
+        match full_check(&deps(&r, &h, &cache, false), "m") {
             Status::NeedsSetup { missing } => {
                 assert!(missing.contains(&Component::Ollama));
                 assert!(missing.contains(&Component::ClaudeCode));
@@ -163,7 +196,8 @@ mod tests {
     fn old_ollama_requires_upgrade() {
         let r = MockRunner::default().on("ollama --version", 0, "ollama version is 0.15.0");
         let h = MockHttp::default().on(PING, Ok("{}"));
-        match full_check(&deps(&r, &h, true), "m") {
+        let cache = OnceLock::new();
+        match full_check(&deps(&r, &h, &cache, true), "m") {
             Status::NeedsSetup { missing } => assert_eq!(missing, vec![Component::OllamaUpgrade]),
             other => panic!("got {other:?}"),
         }
@@ -175,7 +209,8 @@ mod tests {
             .on("ollama --version", 0, "ollama version is 0.30.6")
             .on("ollama list", 0, "NAME\nminimax-m2.7:cloud  -");
         let h = MockHttp::default(); // ping always fails
-        let st = full_check(&deps(&r, &h, true), "minimax-m2.7:cloud");
+        let cache = OnceLock::new();
+        let st = full_check(&deps(&r, &h, &cache, true), "minimax-m2.7:cloud");
         assert!(r.calls.lock().unwrap().iter().any(|c| c.starts_with("DETACHED ollama serve")));
         assert!(matches!(st, Status::Degraded { .. })); // can't start → Degraded
     }
@@ -186,7 +221,8 @@ mod tests {
             .on("ollama --version", 0, "ollama version is 0.30.6")
             .on("ollama list", 0, "NAME\nother:cloud  -");
         let h = MockHttp::default().on(PING, Ok("{}"));
-        let result = full_check(&deps(&r, &h, true), "minimax-m2.7:cloud");
+        let cache = OnceLock::new();
+        let result = full_check(&deps(&r, &h, &cache, true), "minimax-m2.7:cloud");
         assert_eq!(result, Status::NeedsSetup { missing: vec![Component::Model] });
         assert!(!r.calls.lock().unwrap().iter().any(|c| c.contains("pull")));
     }
@@ -226,15 +262,40 @@ mod tests {
     // --- quick_check tests ---
 
     #[test]
-    fn quick_check_healthy_path_spawns_no_subprocess() {
-        let r = MockRunner::default();
+    fn quick_check_healthy_path_runs_version_gate_once_then_caches() {
+        let r = MockRunner::default().on("ollama --version", 0, "ollama version is 0.30.6");
         let h = MockHttp::default().on(PING, Ok(r#"{"version":"0.30.6"}"#));
         let dir = tempfile::tempdir().unwrap();
         let claude_file = dir.path().join("claude.exe");
         std::fs::write(&claude_file, b"").unwrap();
-        let d = deps_with_path(&r, &h, vec![claude_file]);
+        let cache = OnceLock::new();
+        let d = deps_with_path(&r, &h, &cache, vec![claude_file]);
+        // First healthy call: exactly one subprocess — the version gate.
         assert_eq!(quick_check(&d), Status::Ready);
-        assert!(r.calls.lock().unwrap().is_empty(), "no subprocess should be spawned on healthy path");
+        {
+            let calls = r.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "first healthy call spawns at most one subprocess; got {calls:?}");
+            assert!(calls[0].starts_with("ollama --version"), "the single call must be the version gate; got {calls:?}");
+        }
+        // Second call: version is cached → NO new subprocess.
+        assert_eq!(quick_check(&d), Status::Ready);
+        assert_eq!(r.calls.lock().unwrap().len(), 1, "cached version gate must not spawn again");
+    }
+
+    #[test]
+    fn quick_check_healthy_ping_but_old_ollama_is_needs_setup() {
+        // Server answers the ping but the binary is below the minimum version →
+        // must NOT report Ready; route to wizard (full_check will plan the upgrade).
+        let r = MockRunner::default().on("ollama --version", 0, "ollama version is 0.15.0");
+        let h = MockHttp::default().on(PING, Ok("{}"));
+        let dir = tempfile::tempdir().unwrap();
+        let claude_file = dir.path().join("claude.exe");
+        std::fs::write(&claude_file, b"").unwrap();
+        let cache = OnceLock::new();
+        let d = deps_with_path(&r, &h, &cache, vec![claude_file]);
+        assert_eq!(quick_check(&d), Status::NeedsSetup { missing: vec![] });
+        // A negative result must NOT be cached: an upgrade mid-process should recover.
+        assert!(cache.get().is_none(), "version gate must not cache a negative result");
     }
 
     #[test]
@@ -249,7 +310,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let claude_file = dir.path().join("claude.exe");
         std::fs::write(&claude_file, b"").unwrap();
-        let d = deps_with_path(&r, &h, vec![claude_file]);
+        let cache = OnceLock::new();
+        let d = deps_with_path(&r, &h, &cache, vec![claude_file]);
         assert_eq!(quick_check(&d), Status::Ready);
         assert!(r.calls.lock().unwrap().iter().any(|c| c.starts_with("DETACHED ollama serve")));
     }
@@ -258,7 +320,34 @@ mod tests {
     fn quick_check_missing_everything_is_needs_setup() {
         let r = MockRunner::default(); // ollama missing
         let h = MockHttp::default();
-        let d = deps_with_path(&r, &h, vec![PathBuf::from("definitely/not/here.exe")]);
+        let cache = OnceLock::new();
+        let d = deps_with_path(&r, &h, &cache, vec![PathBuf::from("definitely/not/here.exe")]);
         assert_eq!(quick_check(&d), Status::NeedsSetup { missing: vec![] });
+    }
+
+    // --- ensure_server (pub(crate): reused by wizard signin/model steps) ---
+
+    #[test]
+    fn ensure_server_alive_returns_true_without_spawning() {
+        let r = MockRunner::default();
+        let h = MockHttp::default().on(PING, Ok("{}"));
+        assert!(ensure_server(&r, &h, 1, 2));
+        assert!(r.calls.lock().unwrap().is_empty(), "alive server must not trigger a spawn");
+    }
+
+    #[test]
+    fn ensure_server_spawns_and_polls_until_alive() {
+        let r = MockRunner::default();
+        let h = MockHttp::default().on(PING, Ok("{}")).failing_first(PING, 1);
+        assert!(ensure_server(&r, &h, 1, 2));
+        assert!(r.calls.lock().unwrap().iter().any(|c| c.starts_with("DETACHED ollama serve")));
+    }
+
+    #[test]
+    fn ensure_server_returns_false_when_server_never_answers() {
+        let r = MockRunner::default();
+        let h = MockHttp::default(); // ping always fails
+        assert!(!ensure_server(&r, &h, 1, 2));
+        assert!(r.calls.lock().unwrap().iter().any(|c| c.starts_with("DETACHED ollama serve")));
     }
 }

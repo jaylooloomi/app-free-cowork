@@ -11,7 +11,7 @@ export const S = {
   wizardDisclaimer: "本工具會讓 AI 自動執行檔案操作(預設不逐項確認)。可在設定中開啟「謹慎模式」。",
   wizardStart: "開始使用",
   wizardStepLabels: {
-    ollama: "安裝 Ollama",
+    ollama: "安裝 Ollama(約 1.3GB,視網速可能需要十多分鐘)",
     ollama_upgrade: "升級 Ollama",
     claude: "安裝 Claude Code",
     signin: "登入 ollama.com",

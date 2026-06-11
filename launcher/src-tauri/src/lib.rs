@@ -38,6 +38,11 @@ pub fn sync_autostart(app: &AppHandle, enabled: bool) {
 
 fn show_palette_centered(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("palette") {
+        // 已顯示 → 只取焦點;不重新定位、不重發 palette-shown(避免清空使用者輸入)
+        if w.is_visible().unwrap_or(false) {
+            let _ = w.set_focus();
+            return;
+        }
         // Lazy catalog refresh: recover from offline-at-boot
         if app.state::<ipc::AppState>().catalog_cache.lock().unwrap().is_empty() {
             refresh_catalog(app.clone());
@@ -120,6 +125,11 @@ pub fn run() {
         // single-instance 必須最先註冊(Tauri 文件要求)
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             handle_argv(app, &argv);
+            // 使用者直接再點一次程式(無參數)→ 視為「叫出輸入面板」
+            // (僅限第二份實例;開機那份的 handle_argv 不受影響)
+            if !argv.iter().any(|a| a == "--run" || a == "--show-palette") {
+                show_palette_centered(app);
+            }
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())

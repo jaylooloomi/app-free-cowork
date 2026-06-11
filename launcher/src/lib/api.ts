@@ -12,7 +12,7 @@ export interface Settings {
 }
 
 export interface StatusDto {
-  state: "ready" | "needs_setup" | "degraded";
+  state: "ready" | "needs_setup" | "degraded" | "offline";
   model: string;
   detail: string;
 }

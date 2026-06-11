@@ -52,6 +52,9 @@ fn winget_path(runner: &dyn Runner) -> Option<String> {
     None
 }
 
+/// Installs Ollama via winget, falling back to the official installer download.
+/// The installer is ~1.3 GB — the direct-download fallback can take 10+ minutes
+/// on slow connections (download timeout: 1 hour).
 pub fn install_ollama(runner: &dyn Runner, http: &dyn Http, temp_dir: PathBuf) -> StepResult {
     let mut winget_note: Option<String> = None;
 
@@ -93,7 +96,8 @@ pub fn install_ollama(runner: &dyn Runner, http: &dyn Http, temp_dir: PathBuf) -
     // Fallback: direct download of the official installer (Inno Setup → /VERYSILENT)
     // Uses download_to_file to stream to disk — no get_bytes in http.rs
     let exe = temp_dir.join("OllamaSetup.exe");
-    let fallback_result = match http.download_to_file(OLLAMA_SETUP_URL, &exe, Duration::from_secs(600)) {
+    // ~1.3 GB installer: timeout_global caps the WHOLE transfer, so allow a full hour.
+    let fallback_result = match http.download_to_file(OLLAMA_SETUP_URL, &exe, Duration::from_secs(3600)) {
         Err(e) => StepResult {
             ok: false,
             detail: format!("下載 OllamaSetup.exe 失敗: {e}"),
@@ -166,6 +170,9 @@ pub fn register_model(runner: &dyn Runner, model: &str) -> StepResult {
 /// by appending known install dirs to PATH if absent (case-insensitive check).
 pub fn refresh_path() {
     let current = std::env::var("PATH").unwrap_or_default();
+    // Single-writer assumption: PATH is only mutated here, and callers run inside
+    // wizard steps which execute sequentially (one spawn_blocking at a time), so
+    // the read-modify-write below cannot race with another writer.
     std::env::set_var("PATH", merged_path(&current, &known_dirs()));
 }
 

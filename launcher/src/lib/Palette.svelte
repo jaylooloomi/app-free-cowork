@@ -35,7 +35,10 @@
       refresh();
       el?.focus();
     });
-    const onBlur = () => api.hidePalette();
+    // busy(任務送出中)時不自動隱藏 — 避免提交瞬間失焦把面板關掉
+    const onBlur = () => {
+      if (!busy) api.hidePalette();
+    };
     window.addEventListener("blur", onBlur);
     return () => {
       unlisten.then((f) => f());
@@ -44,7 +47,7 @@
   });
 
   async function submit() {
-    if (busy) return;
+    if (busy || offline) return;
     error = "";
     busy = true;
     try {
@@ -73,6 +76,9 @@
     }
   }
 
+  const offline = $derived(status?.state === "offline");
+
+  // offline 文案以後端 detail 為單一來源(避免前後端字串分歧)
   const statusText = $derived(
     !status
       ? ""
@@ -80,12 +86,14 @@
         ? S.statusReady(status.model)
         : status.state === "needs_setup"
           ? S.statusNeedsSetup
-          : S.statusDegraded(status.detail),
+          : status.state === "offline"
+            ? status.detail
+            : S.statusDegraded(status.detail),
   );
 </script>
 
 <main class="palette">
-  <input bind:this={el} bind:value={input} placeholder={S.placeholder} onkeydown={onKey} disabled={busy} />
+  <input bind:this={el} bind:value={input} placeholder={S.placeholder} onkeydown={onKey} disabled={busy || offline} />
   <div class="status" class:error={!!error}>{error || statusText}</div>
 </main>
 
