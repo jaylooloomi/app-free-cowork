@@ -12,7 +12,10 @@ body {
    effect was applied (fx::EFFECTS_APPLIED). Wizard/settings never set these,
    so they keep the default #181818 above. */
 body.fx-glass {
-  background: transparent;
+  /* 不全透明:加一層深色 wash 疊在 OS acrylic 上,
+     淺色主題的 Win11 也能維持深色面板對比(html:has 規則維持透明讓 acrylic 透出)。 */
+  background: rgba(24, 24, 28, 0.55);
+  overflow: hidden;
   --panel-bg: rgba(30, 30, 40, 0.5);
   --panel-border: rgba(255, 255, 255, 0.12);
 }
@@ -25,6 +28,7 @@ html:has(body.fx-glass) {
 
 body.fx-solid {
   background: #181818;
+  overflow: hidden;
 }
 
 * {

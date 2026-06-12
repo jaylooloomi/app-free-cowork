@@ -2,17 +2,20 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-  import { api, type StatusDto, type QueueDto, type ModelEntry } from "./api";
+  import { api, type StatusDto, type QueueDto, type ModelEntry, type Settings } from "./api";
   import { S } from "./strings";
 
   let input = $state("");
   let status = $state<StatusDto | null>(null);
+  let settings = $state<Settings | null>(null);
   let error = $state("");
   let busy = $state(false);
   let history: string[] = $state([]);
   let hIndex = $state(-1);
   let el: HTMLInputElement | null = $state(null);
   let rootEl: HTMLElement | null = $state(null);
+  let dropdownEl: HTMLElement | null = $state(null);
+  let chipsEl: HTMLElement | null = $state(null);
 
   // v1.1 state
   let queue = $state<QueueDto | null>(null);
@@ -34,13 +37,22 @@
     } catch {
       status = null;
     }
+    try {
+      settings = await api.getSettings();
+    } catch {
+      // 保留上次成功值;從未成功時 micTooltip / ✓ 走預設 fallback
+    }
   }
 
+  // 世代計數器:queue-changed 連發時,過期的 queueList 回應不可覆蓋較新的結果
+  let queueGen = 0;
   async function refreshQueue() {
+    const gen = ++queueGen;
     try {
-      queue = await api.queueList();
+      const q = await api.queueList();
+      if (gen === queueGen) queue = q;
     } catch {
-      queue = null;
+      if (gen === queueGen) queue = null;
     }
   }
 
@@ -80,16 +92,17 @@
     });
     // busy(任務送出中)時不自動隱藏 — 避免提交瞬間失焦把面板關掉
     const onBlur = () => {
-      if (!busy) api.hidePalette();
+      if (!busy) api.hidePalette().catch(() => {});
     };
     window.addEventListener("blur", onBlur);
-    // 視窗高度跟著內容長(佇列、模型選單):基準 168、上限 420。
+    // 視窗高度貼齊內容(佇列、模型選單):下限 110、上限 420。
+    // ResizeObserver 在 observe() 時會立刻送出初始觀測,首次顯示前就會收斂到內容高度。
     // 後端只設定位置、不設定大小,不會互相干擾。
     const win = getCurrentWindow();
     let lastH = 0;
     const ro = new ResizeObserver(() => {
       if (!rootEl) return;
-      const h = Math.min(420, Math.max(168, Math.ceil(rootEl.offsetHeight)));
+      const h = Math.min(420, Math.max(110, Math.ceil(rootEl.offsetHeight)));
       if (h !== lastH) {
         lastH = h;
         win.setSize(new LogicalSize(640, h)).catch(() => {});
@@ -104,6 +117,19 @@
       clearTimeout(transientTimer);
       clearTimeout(listenTimer);
     };
+  });
+
+  // 模型選單開啟期間監聽 document pointerdown:點在選單與 chips 之外就關閉。
+  // 用 $effect 讓所有關閉路徑(選取、Esc、palette-shown 重置)都自動解除監聽。
+  $effect(() => {
+    if (!dropdownOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (dropdownEl?.contains(t) || chipsEl?.contains(t)) return;
+      dropdownOpen = false;
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
   });
 
   async function submit() {
@@ -125,11 +151,20 @@
     }
   }
 
+  // Escape 走全域(svelte:window)— 不管焦點在哪都能關閉選單/面板,並處理層級:
+  // 選單開啟時先關選單,再按一次才隱藏面板。
+  function onGlobalKey(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    if (dropdownOpen) {
+      dropdownOpen = false;
+      return;
+    }
+    api.hidePalette().catch(() => {});
+  }
+
   function onKey(e: KeyboardEvent) {
     if (e.key === "Enter") {
       submit();
-    } else if (e.key === "Escape") {
-      api.hidePalette();
     } else if (e.key === "ArrowUp" && hIndex < history.length - 1) {
       e.preventDefault();
       hIndex += 1;
@@ -143,6 +178,9 @@
 
   async function onMic() {
     error = "";
+    // Win+H 需要插入點(caret)在輸入框內,先把焦點放回輸入框再觸發。
+    // 按鈕本身的 mousedown 已被 preventDefault,點擊不會搶走焦點。
+    el?.focus();
     try {
       await api.startVoiceInput();
     } catch (e) {
@@ -194,6 +232,7 @@
     error = "";
     try {
       await api.setModel(name);
+      if (settings) settings = { ...settings, model: name };
       status = await api.getStatus();
     } catch (e) {
       error = String(e);
@@ -244,7 +283,15 @@
   };
 
   const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
+
+  // mic tooltip 帶入使用者實際設定的快捷鍵;尚未取得設定時退回預設值
+  const micTip = $derived(S.micTooltip(settings?.hotkey || "Alt+H"));
+
+  // ✓ 以設定檔的 model 為準(offline 時 status.model 可能不可靠),退回 status?.model
+  const currentModel = $derived(settings?.model || status?.model);
 </script>
+
+<svelte:window onkeydown={onGlobalKey} />
 
 <main class="palette" bind:this={rootEl}>
   <div class="input-row">
@@ -260,9 +307,10 @@
       class="mic"
       class:listening
       onclick={onMic}
+      onmousedown={(e) => e.preventDefault()}
       disabled={busy || offline}
-      title={S.micTooltip}
-      aria-label={S.micTooltip}
+      title={micTip}
+      aria-label={micTip}
     >
       <svg
         viewBox="0 0 24 24"
@@ -283,7 +331,8 @@
     </button>
   </div>
 
-  {#if hasQueue && queue}
+  <!-- 選單開啟時暫時隱藏佇列,避免合計高度頂到 420 上限被裁切 -->
+  {#if hasQueue && queue && !dropdownOpen}
     <div class="queue">
       {#if queue.running}
         <div class="qrow running">
@@ -310,7 +359,7 @@
     <div class="status" class:error={!!error}>
       {error || transient || (listening ? S.voiceHint : statusText)}
     </div>
-    <div class="chips">
+    <div class="chips" bind:this={chipsEl}>
       {#if planLabel}
         <button class="chip" onclick={openPlanPage} title={S.planTooltip}>{planLabel}</button>
       {/if}
@@ -321,10 +370,10 @@
   </div>
 
   {#if dropdownOpen}
-    <div class="dropdown">
+    <div class="dropdown" bind:this={dropdownEl}>
       {#each models as m (m.name)}
         <button class="opt" onclick={() => pickModel(m.name)}>
-          <span class="check">{m.name === status?.model ? "✓" : ""}</span>
+          <span class="check">{m.name === currentModel ? "✓" : ""}</span>
           <span class="name">{m.name}</span>
           <span class="badge {m.tier}">{tierLabels[m.tier]}</span>
         </button>

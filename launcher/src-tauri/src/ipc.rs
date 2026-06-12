@@ -3,7 +3,7 @@ use crate::http::UreqHttp;
 use crate::settings::{Settings, SigninState};
 use crate::{bootstrap, catalog, doctor, launcher, logging, settings};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter as _, Manager, State};
 
@@ -15,21 +15,31 @@ pub struct QueuedTask {
 }
 
 /// 執行中的任務;pid 供 task_stop 以 taskkill 終止背景任務。
+/// stopping = 使用者已按下停止(task_stop)— 結束時不得當作失敗通知。
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct RunningTask {
     pub id: u64,
     pub prompt: String,
     pub background: bool,
     pub pid: Option<u32>,
+    pub stopping: bool,
+}
+
+/// 佇列狀態機:running + queued 必須在同一把鎖下變更,
+/// 否則「判斷是否執行中」與「入列/啟動」之間的空窗會讓
+/// double-submit 同時跑兩個任務、或讓佇列任務被遺落(TOCTOU)。
+#[derive(Default)]
+pub struct QueueState {
+    pub running: Option<RunningTask>,
+    pub queued: VecDeque<QueuedTask>,
 }
 
 pub struct AppState {
     pub settings: Mutex<Settings>,
     pub pending_prompt: Mutex<Option<String>>,
     pub catalog_cache: Mutex<Vec<String>>,
-    /// FIFO 任務佇列(in-memory;app 重啟即清空)
-    pub queue: Mutex<VecDeque<QueuedTask>>,
-    pub running: Mutex<Option<RunningTask>>,
+    /// FIFO 任務佇列+執行中任務(單一鎖 = 單一事實來源;in-memory,app 重啟即清空)
+    pub queue: Mutex<QueueState>,
     pub next_task_id: AtomicU64,
     /// /api/me 回報的方案("free"/"pro"…);None = 尚未取得
     pub plan: Mutex<Option<String>>,
@@ -41,8 +51,7 @@ impl AppState {
             settings: Mutex::new(settings),
             pending_prompt: Mutex::new(None),
             catalog_cache: Mutex::new(Vec::new()),
-            queue: Mutex::new(VecDeque::new()),
-            running: Mutex::new(None),
+            queue: Mutex::new(QueueState::default()),
             next_task_id: AtomicU64::new(1),
             plan: Mutex::new(None),
         }
@@ -84,6 +93,23 @@ pub fn get_settings(state: State<AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 
+/// server-side overlay:以「目前記憶體設定」為底,只接受 UI 可編輯的 6 個欄位。
+/// history/signin_state/known_subscription_models 由後端在設定視窗開啟期間
+/// 持續更新(submit_prompt、tier learning、auth re-lock),不可被前端的舊快照蓋掉。
+fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
+    Settings {
+        hotkey: incoming.hotkey.clone(),
+        model: incoming.model.clone(),
+        cautious_mode: incoming.cautious_mode,
+        background_mode: incoming.background_mode,
+        working_dir: incoming.working_dir.clone(),
+        autostart: incoming.autostart,
+        history: current.history.clone(),
+        signin_state: current.signin_state.clone(),
+        known_subscription_models: current.known_subscription_models.clone(),
+    }
+}
+
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_settings: Settings) -> Result<(), String> {
     // (a) Read old settings clone before any mutation
@@ -98,11 +124,14 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
         }
     }
 
-    // (c) Persist to disk with NEW settings — on Err return Err WITHOUT updating in-memory state
-    settings::save(&settings::settings_path(), &new_settings).map_err(|e| e.to_string())?;
-
-    // (d) Only now overwrite in-memory state
-    *state.settings.lock().unwrap() = new_settings.clone();
+    // (c)+(d) 同一把 settings 鎖內:以當下記憶體值合併(overlay)→ 先落地 →
+    // 再提交記憶體;落地失敗回 Err 且不動記憶體(沿用既有順序)
+    {
+        let mut s = state.settings.lock().unwrap();
+        let merged = overlay_ui_fields(&s, &new_settings);
+        settings::save(&settings::settings_path(), &merged).map_err(|e| e.to_string())?;
+        *s = merged;
+    }
 
     // (e) Sync autostart (always runs when we reach here)
     crate::sync_autostart(&app, new_settings.autostart);
@@ -231,21 +260,42 @@ fn new_task(state: &AppState, prompt: String) -> QueuedTask {
     QueuedTask { id: state.next_task_id.fetch_add(1, Ordering::Relaxed), prompt }
 }
 
-/// 純佇列判斷:已有任務執行中 → 入列並回傳 None;否則把任務還給呼叫者啟動。
-/// (拆成純函式以便單元測試;launch_or_enqueue 負責 emit 與實際啟動)
-fn try_enqueue(state: &AppState, task: QueuedTask) -> Option<QueuedTask> {
-    if state.running.lock().unwrap().is_some() {
-        state.queue.lock().unwrap().push_back(task);
-        None
-    } else {
+/// 預約紀錄:決策當下就佔住 running 槽位,pid/background 由 do_launch
+/// 在 spawn 成功後(同一把 queue 鎖內)補上。
+fn reservation(task: &QueuedTask) -> RunningTask {
+    RunningTask { id: task.id, prompt: task.prompt.clone(), background: false, pid: None, stopping: false }
+}
+
+/// 原子決策+預約(C1):單一鎖內完成「判斷 idle」與「佔住 running 槽位」。
+/// idle → 立刻寫入預約並把任務交還呼叫者啟動;否則入列回傳 None。
+/// 預約存在後,任何緊接著的決策都只會入列 — double-submit 不可能並行執行。
+fn reserve_or_enqueue(state: &AppState, task: QueuedTask) -> Option<QueuedTask> {
+    let mut q = state.queue.lock().unwrap();
+    if q.running.is_none() {
+        q.running = Some(reservation(&task));
         Some(task)
+    } else {
+        q.queued.push_back(task);
+        None
     }
+}
+
+/// 共用佇列接續(呼叫端必須已持有 queue 鎖):清掉 running、彈出佇列頭,
+/// 並在同一鎖內為彈出的任務建立預約 — 解鎖後的任何 enqueue 決策都會看到
+/// running 已被佔用,不會與彈出的任務並行。
+fn pop_and_reserve_next(q: &mut QueueState) -> Option<QueuedTask> {
+    q.running = None;
+    let next = q.queued.pop_front();
+    if let Some(task) = &next {
+        q.running = Some(reservation(task));
+    }
+    next
 }
 
 /// Ready 狀態的統一入口:執行中 → 排入佇列("queued");否則立即啟動("launched")。
 fn launch_or_enqueue(app: &AppHandle, task: QueuedTask) -> Result<&'static str, String> {
     let state = app.state::<AppState>();
-    match try_enqueue(&state, task) {
+    match reserve_or_enqueue(&state, task) {
         None => {
             emit_queue_changed(app);
             Ok("queued")
@@ -257,10 +307,9 @@ fn launch_or_enqueue(app: &AppHandle, task: QueuedTask) -> Result<&'static str, 
     }
 }
 
-/// 純佇列變更:清掉 running、取出佇列最前面的任務(FIFO)。
+/// 佇列接續(任務結束時):單一鎖內清掉 running 並原子彈出+預約下一個任務。
 fn take_next(state: &AppState) -> Option<QueuedTask> {
-    *state.running.lock().unwrap() = None;
-    state.queue.lock().unwrap().pop_front()
+    pop_and_reserve_next(&mut state.queue.lock().unwrap())
 }
 
 /// 通知用的需求預覽(前 20 個字,按字元數而非位元組,CJK 安全)。
@@ -268,8 +317,9 @@ fn prompt_preview(prompt: &str) -> String {
     prompt.chars().take(20).collect()
 }
 
-/// 任務結束後的佇列接續:清掉 running、取出下一個任務並啟動。
-/// 啟動失敗時通知並繼續嘗試下一個,避免佇列卡死。
+/// 任務結束後的佇列接續:take_next 在單一鎖內清掉 running 並彈出+預約下一個,
+/// 再於鎖外啟動。啟動失敗時 do_launch 會自行清預約並接續再下一個,
+/// 這裡只負責通知失敗訊息,佇列不會卡死。
 pub fn start_or_queue_next(app: &AppHandle) {
     let state = app.state::<AppState>();
     let next = take_next(&state);
@@ -278,7 +328,6 @@ pub fn start_or_queue_next(app: &AppHandle) {
         crate::notify(app, &format!("開始執行:{}…", prompt_preview(&task.prompt)));
         if let Err(e) = do_launch(app, task) {
             crate::notify(app, &e);
-            start_or_queue_next(app);
         }
     }
 }
@@ -289,8 +338,43 @@ fn emit_queue_changed(app: &AppHandle) {
     }
 }
 
+/// 啟動「已預約」的任務(前置條件:running 已是該任務的預約 — 由
+/// reserve_or_enqueue / pop_and_reserve_next 建立)。任何失敗都會在同一把鎖內
+/// 清掉預約並原子接續下一個佇列任務(pop_and_reserve_next),佇列不會卡死;
+/// 原始錯誤仍回傳給呼叫者(submit_prompt 顯示於面板、start_or_queue_next 通知)。
 pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
     let state = app.state::<AppState>();
+    match try_launch(app, &state, task) {
+        Ok(()) => {
+            // 成功啟動過 → 視為已登入(auth 失敗時 runtime 會改回 No)
+            {
+                let mut st = state.settings.lock().unwrap();
+                if st.signin_state == SigninState::Unknown {
+                    st.signin_state = SigninState::Yes;
+                    let _ = settings::save(&settings::settings_path(), &st);
+                }
+            }
+            emit_queue_changed(app);
+            Ok(())
+        }
+        Err(e) => {
+            // 預約失效:清掉 running 並原子彈出+預約下一個,於鎖外接續啟動
+            let next = pop_and_reserve_next(&mut state.queue.lock().unwrap());
+            emit_queue_changed(app);
+            if let Some(next_task) = next {
+                crate::notify(app, &format!("開始執行:{}…", prompt_preview(&next_task.prompt)));
+                if let Err(chain_err) = do_launch(app, next_task) {
+                    crate::notify(app, &chain_err);
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// do_launch 的實際啟動段:spawn 成功後在 queue 鎖內把 pid/background 補進
+/// 既有預約;Err 一律交給 do_launch 統一清預約並接續佇列。
+fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(), String> {
     let s = state.settings.lock().unwrap().clone();
     let cat = state.catalog_cache.lock().unwrap().clone();
     let (model, notice) = catalog::choose_model(&s.model, &cat);
@@ -309,25 +393,26 @@ pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
         start_or_queue_next(&app2);
     });
     {
-        // 持鎖橫跨 spawn → 設 running:waiter 的 start_or_queue_next 第一步就鎖
-        // running,因此「極速結束」也不會在 running 寫入前被清掉。
-        let mut running = state.running.lock().unwrap();
+        // 持鎖橫跨 spawn → 補 pid:waiter(handle_task_exit/start_or_queue_next)
+        // 第一步就鎖 queue,因此「極速結束」也不會在 pid 寫入前清掉預約。
+        let mut q = state.queue.lock().unwrap();
         let pid = launcher::spawn(&spec, log, Some(on_done)).map_err(|e| format!("啟動失敗:{e}"))?;
-        *running = Some(RunningTask { id: task.id, prompt: task.prompt, background: is_background, pid: Some(pid) });
-    }
-    // 成功啟動過 → 視為已登入(auth 失敗時 runtime 會改回 No)
-    {
-        let mut st = state.settings.lock().unwrap();
-        if st.signin_state == SigninState::Unknown {
-            st.signin_state = SigninState::Yes;
-            let _ = settings::save(&settings::settings_path(), &st);
+        if let Some(rt) = q.running.as_mut().filter(|rt| rt.id == task.id) {
+            rt.pid = Some(pid);
+            rt.background = is_background;
         }
     }
-    emit_queue_changed(app);
     Ok(())
 }
 
+/// 退出中的任務是否為使用者主動停止(task_stop 標記)。
+/// 必須在 waiter 呼叫 start_or_queue_next 清掉 running「之前」讀取。
+fn task_was_stopping(state: &AppState) -> bool {
+    state.queue.lock().unwrap().running.as_ref().is_some_and(|rt| rt.stopping)
+}
+
 /// 任務結束通知決策(原本散在 launcher.rs 的 fast-fail 判斷移到這裡):
+/// - 使用者主動停止(stopping)→ 「已停止任務」,不跑失敗分類
 /// - code 0:背景 → 「任務完成」;前景 → 靜默
 /// - 非 0 前景且 30 秒內結束 → fast-fail 訊息(前景無記錄檔可分類)
 /// - 非 0 前景且超過 30 秒 → 靜默(多半是使用者自行關閉終端機,沿用 v1 行為)
@@ -340,6 +425,12 @@ fn handle_task_exit(
     is_background: bool,
     model: &str,
 ) {
+    // M3:taskkill 的退出碼會被分類成「任務失敗」— 使用者主動停止不是失敗。
+    // 佇列接續由呼叫端(start_or_queue_next)照常進行。
+    if task_was_stopping(&app.state::<AppState>()) {
+        crate::notify(app, "已停止任務");
+        return;
+    }
     if code == 0 {
         if is_background {
             crate::notify(app, "任務完成");
@@ -522,18 +613,16 @@ pub struct QueueDto {
 
 #[tauri::command]
 pub fn queue_list(state: State<AppState>) -> QueueDto {
-    QueueDto {
-        running: state.running.lock().unwrap().clone(),
-        queued: state.queue.lock().unwrap().iter().cloned().collect(),
-    }
+    let q = state.queue.lock().unwrap();
+    QueueDto { running: q.running.clone(), queued: q.queued.iter().cloned().collect() }
 }
 
 /// 純佇列變更:移除指定 id,回傳是否有移除。
 fn cancel_in_queue(state: &AppState, id: u64) -> bool {
     let mut q = state.queue.lock().unwrap();
-    let before = q.len();
-    q.retain(|t| t.id != id);
-    q.len() != before
+    let before = q.queued.len();
+    q.queued.retain(|t| t.id != id);
+    q.queued.len() != before
 }
 
 #[tauri::command]
@@ -545,24 +634,40 @@ pub fn queue_cancel(state: State<AppState>, app: AppHandle, id: u64) -> Result<(
     Ok(())
 }
 
-/// 純決策:目前 running 能否被停止?能 → 回傳要 taskkill 的 pid。
-fn stop_decision(running: &Option<RunningTask>) -> Result<u32, String> {
-    match running {
-        None => Err("目前沒有執行中的任務".into()),
-        Some(rt) if !rt.background => Err("前景任務請直接關閉其終端機視窗".into()),
-        Some(rt) => rt.pid.ok_or_else(|| "無法取得任務的處理程序 ID".into()),
+/// 純決策+標記(M4):在「同一次持鎖」中完成 — 確認 running 仍是預期任務
+/// (id 不符 → 任務已換手)、套用停止規則、標記 stopping(M3)並回傳
+/// (id, pid) 供鎖外 taskkill。讀 pid 與標記之間沒有空窗,不會殺錯任務。
+fn mark_stopping(q: &mut QueueState, expected_id: Option<u64>) -> Result<(u64, u32), String> {
+    let Some(rt) = q.running.as_mut() else {
+        return Err("目前沒有執行中的任務".into());
+    };
+    if expected_id.is_some_and(|id| id != rt.id) {
+        return Err("任務已結束".into());
     }
+    if !rt.background {
+        return Err("前景任務請直接關閉其終端機視窗".into());
+    }
+    let pid = rt.pid.ok_or_else(|| "無法取得任務的處理程序 ID".to_string())?;
+    rt.stopping = true;
+    Ok((rt.id, pid))
 }
 
 /// 停止背景任務:taskkill 整個 process tree;不在這裡清 running —
 /// waiter 執行緒的 on_done 會自然觸發並接續佇列。
+/// id 為前端「想停的那個任務」(可省略 = 停目前執行中的);若任務已換手
+/// 回 Err,不會誤殺接續的任務。
 #[tauri::command]
-pub fn task_stop(state: State<AppState>, _app: AppHandle) -> Result<(), String> {
-    let pid = stop_decision(&state.running.lock().unwrap())?;
+pub fn task_stop(state: State<AppState>, _app: AppHandle, id: Option<u64>) -> Result<(), String> {
+    let (task_id, pid) = mark_stopping(&mut state.queue.lock().unwrap(), id)?;
     use crate::command::Runner as _;
-    SystemRunner
-        .spawn_detached("taskkill", &["/PID", &pid.to_string(), "/T", "/F"])
-        .map_err(|e| e.to_string())
+    if let Err(e) = SystemRunner.spawn_detached("taskkill", &["/PID", &pid.to_string(), "/T", "/F"]) {
+        // taskkill 沒送出 → 撤銷標記,任務之後的自然結束不該被報成「已停止」
+        if let Some(rt) = state.queue.lock().unwrap().running.as_mut().filter(|rt| rt.id == task_id) {
+            rt.stopping = false;
+        }
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
 // ---------- v1.1: model selection + tier learning ----------
@@ -655,31 +760,60 @@ fn fetch_plan(http: &dyn crate::http::Http) -> Option<String> {
     parse_plan(&body)
 }
 
+/// refresh_plan 的 in-flight 防護(M2):get_status 每 5 秒輪詢都可能觸發,
+/// 抓取最長 5 秒 — 沒有防護會堆疊出多個並行的 /api/me 請求。
+static PLAN_FETCH_INFLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// true = 取得抓取權(原 false);false = 已有人在抓,跳過。
+fn try_begin_plan_fetch() -> bool {
+    !PLAN_FETCH_INFLIGHT.swap(true, Ordering::SeqCst)
+}
+
+fn end_plan_fetch() {
+    PLAN_FETCH_INFLIGHT.store(false, Ordering::SeqCst);
+}
+
 /// 非阻塞更新帳號方案快取;啟動時呼叫一次,get_status 在快取為空時也會補觸發。
+/// 同一時間只允許一個 in-flight 抓取(成功或失敗皆會釋放)。
 pub fn refresh_plan(app: AppHandle) {
+    if !try_begin_plan_fetch() {
+        return;
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let plan = fetch_plan(&UreqHttp);
         if plan.is_some() {
             let state = app.state::<AppState>();
             *state.plan.lock().unwrap() = plan;
         }
+        end_plan_fetch();
     });
 }
 
 // ---------- v1.1: voice input (Win+H) ----------
 
 /// 確保輸入面板可見且取得焦點後,送出 Win+H 啟動 Windows 語音輸入。
-/// 50ms 延遲讓焦點切換先完成,語音輸入才會落在面板的輸入框。
+/// 整段流程(聚焦 → 50ms 等焦點切換 → 等實體按鍵放開 → SendInput)都會阻塞,
+/// 因此跑在 spawn_blocking,不佔住 async runtime。
+/// 聚焦失敗時「不注入」— 否則 Win+H 會落在別的視窗。
 #[tauri::command]
 pub async fn start_voice_input(app: AppHandle) -> Result<(), String> {
-    let Some(w) = app.get_webview_window("palette") else {
-        return Err("找不到輸入面板視窗".into());
-    };
-    let _ = w.show();
-    let _ = w.set_focus();
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    crate::voice::trigger_voice_typing();
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(w) = app.get_webview_window("palette") else {
+            return Err("找不到輸入面板視窗".to_string());
+        };
+        let _ = w.show();
+        w.set_focus().map_err(|_| "無法聚焦輸入面板".to_string())?;
+        // 50ms 延遲讓焦點切換先完成,語音輸入才會落在面板的輸入框
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Err(e) = crate::voice::trigger_voice_typing() {
+            // 熱鍵路徑(lib.rs)會丟棄回傳值 — 失敗必須額外以通知浮現
+            crate::notify(&app, &e);
+            return Err(e);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -724,18 +858,23 @@ mod tests {
 
     // NOTE 測試涵蓋範圍:tauri::command 函式需要 AppHandle/State(無 tauri "test"
     // feature 可用),因此命令本體與事件發送(queue-changed)、do_launch 的
-    // RunningTask 記錄、on_done 通知與佇列接續(start_or_queue_next 經由真實
+    // pid 回填、on_done 通知與佇列接續(start_or_queue_next 經由真實
     // waiter 執行緒觸發)只能由 E2E 驗證。單元測試鎖定其中的純邏輯:
-    // 佇列變更(try_enqueue/cancel_in_queue/take_next)、停止決策(stop_decision)、
-    // tier 計算、URL 白名單、/api/me 解析。
+    // 佇列狀態機(reserve_or_enqueue/pop_and_reserve_next/take_next/
+    // cancel_in_queue)、停止決策+標記(mark_stopping/task_was_stopping)、
+    // 設定 overlay、plan in-flight 防護、tier 計算、URL 白名單、/api/me 解析。
 
     fn state() -> AppState {
         AppState::new(Settings::default())
     }
 
+    fn running_task(id: u64, background: bool, pid: Option<u32>) -> RunningTask {
+        RunningTask { id, prompt: "busy".into(), background, pid, stopping: false }
+    }
+
     fn enqueue_prompt(st: &AppState, prompt: &str) -> QueuedTask {
         let task = new_task(st, prompt.into());
-        assert!(try_enqueue(st, task.clone()).is_none(), "running 中應入列");
+        assert!(reserve_or_enqueue(st, task.clone()).is_none(), "running 中應入列");
         task
     }
 
@@ -748,65 +887,180 @@ mod tests {
     }
 
     #[test]
-    fn try_enqueue_launches_directly_when_idle() {
+    fn reserve_or_enqueue_launches_directly_when_idle() {
         let st = state();
         let task = new_task(&st, "hi".into());
         // 沒有 running → 任務交還呼叫者啟動,佇列保持空
-        let returned = try_enqueue(&st, task.clone());
+        let returned = reserve_or_enqueue(&st, task.clone());
         assert_eq!(returned, Some(task));
-        assert!(st.queue.lock().unwrap().is_empty());
+        assert!(st.queue.lock().unwrap().queued.is_empty());
+    }
+
+    /// C1 釘住原子性 (a):idle 時的決策必須「當下就預約」running 槽位 —
+    /// 緊接著的第二個決策(double-submit)只能入列,不可能並行執行。
+    #[test]
+    fn reserve_or_enqueue_reserves_running_slot_atomically() {
+        let st = state();
+        let a = new_task(&st, "first".into());
+        let b = new_task(&st, "second".into());
+        let launched = reserve_or_enqueue(&st, a.clone());
+        assert_eq!(launched, Some(a.clone()));
+        {
+            let q = st.queue.lock().unwrap();
+            let rt = q.running.as_ref().expect("決策當下就必須寫入預約");
+            assert_eq!(rt.id, a.id);
+            assert_eq!(rt.prompt, a.prompt);
+            assert_eq!(rt.pid, None, "pid 由 do_launch 在 spawn 後補上");
+            assert!(!rt.stopping);
+        }
+        let b_id = b.id;
+        assert_eq!(reserve_or_enqueue(&st, b), None, "預約存在 → 第二個決策必須入列");
+        let q = st.queue.lock().unwrap();
+        assert_eq!(q.queued.iter().map(|t| t.id).collect::<Vec<_>>(), vec![b_id]);
+        assert_eq!(q.running.as_ref().map(|rt| rt.id), Some(a.id), "預約不得被第二個決策覆蓋");
     }
 
     #[test]
-    fn try_enqueue_queues_fifo_while_running() {
+    fn reserve_or_enqueue_queues_fifo_while_running() {
         let st = state();
-        *st.running.lock().unwrap() =
-            Some(RunningTask { id: 99, prompt: "busy".into(), background: true, pid: Some(1234) });
+        st.queue.lock().unwrap().running = Some(running_task(99, true, Some(1234)));
         let a = enqueue_prompt(&st, "first");
         let b = enqueue_prompt(&st, "second");
         let c = enqueue_prompt(&st, "third");
-        let q: Vec<u64> = st.queue.lock().unwrap().iter().map(|t| t.id).collect();
+        let q: Vec<u64> = st.queue.lock().unwrap().queued.iter().map(|t| t.id).collect();
         assert_eq!(q, vec![a.id, b.id, c.id], "佇列必須維持 FIFO 順序");
     }
 
     #[test]
     fn cancel_removes_only_the_requested_id() {
         let st = state();
-        *st.running.lock().unwrap() =
-            Some(RunningTask { id: 99, prompt: "busy".into(), background: true, pid: None });
+        st.queue.lock().unwrap().running = Some(running_task(99, true, None));
         let a = enqueue_prompt(&st, "first");
         let b = enqueue_prompt(&st, "second");
         let c = enqueue_prompt(&st, "third");
         assert!(cancel_in_queue(&st, b.id));
-        let q: Vec<u64> = st.queue.lock().unwrap().iter().map(|t| t.id).collect();
+        let q: Vec<u64> = st.queue.lock().unwrap().queued.iter().map(|t| t.id).collect();
         assert_eq!(q, vec![a.id, c.id]);
         assert!(!cancel_in_queue(&st, b.id), "重複取消同 id 應回報找不到");
         assert!(!cancel_in_queue(&st, 424242), "不存在的 id 應回報找不到");
     }
 
     #[test]
-    fn take_next_clears_running_and_pops_fifo() {
+    fn take_next_pops_fifo_and_clears_running_when_queue_empty() {
         let st = state();
-        *st.running.lock().unwrap() =
-            Some(RunningTask { id: 99, prompt: "busy".into(), background: true, pid: Some(1) });
+        st.queue.lock().unwrap().running = Some(running_task(99, true, Some(1)));
         let a = enqueue_prompt(&st, "first");
         let b = enqueue_prompt(&st, "second");
         let next = take_next(&st).unwrap();
         assert_eq!(next.id, a.id);
-        assert!(st.running.lock().unwrap().is_none(), "take_next 必須清掉 running");
         assert_eq!(take_next(&st).unwrap().id, b.id);
         assert!(take_next(&st).is_none(), "佇列清空後應回 None");
+        assert!(st.queue.lock().unwrap().running.is_none(), "沒有下一個任務時必須清掉 running");
+    }
+
+    /// C1 釘住原子性 (b):take_next 在同一把鎖內「彈出+預約」— 彈出
+    /// 之後緊接著的決策必須看到預約而入列,不會與彈出的任務並行。
+    #[test]
+    fn take_next_pops_and_reserves_atomically() {
+        let st = state();
+        st.queue.lock().unwrap().running = Some(running_task(99, true, Some(1)));
+        let a = enqueue_prompt(&st, "first");
+        let b = enqueue_prompt(&st, "second");
+        let next = take_next(&st).unwrap();
+        assert_eq!(next.id, a.id);
+        {
+            let q = st.queue.lock().unwrap();
+            let rt = q.running.as_ref().expect("take_next 必須同時預約彈出的任務");
+            assert_eq!(rt.id, a.id);
+            assert_eq!(rt.pid, None, "pid 由 do_launch 在 spawn 後補上");
+            assert!(!rt.stopping);
+        }
+        let c = new_task(&st, "third".into());
+        let c_id = c.id;
+        assert_eq!(reserve_or_enqueue(&st, c), None, "彈出後緊接著的決策必須入列");
+        let order: Vec<u64> = st.queue.lock().unwrap().queued.iter().map(|t| t.id).collect();
+        assert_eq!(order, vec![b.id, c_id]);
     }
 
     #[test]
-    fn stop_decision_rules() {
-        assert!(stop_decision(&None).is_err(), "沒有執行中任務不能停止");
-        let fg = Some(RunningTask { id: 1, prompt: "p".into(), background: false, pid: Some(10) });
-        assert_eq!(stop_decision(&fg).unwrap_err(), "前景任務請直接關閉其終端機視窗");
-        let bg = Some(RunningTask { id: 2, prompt: "p".into(), background: true, pid: Some(4321) });
-        assert_eq!(stop_decision(&bg).unwrap(), 4321);
-        let bg_no_pid = Some(RunningTask { id: 3, prompt: "p".into(), background: true, pid: None });
-        assert!(stop_decision(&bg_no_pid).is_err());
+    fn mark_stopping_rules_and_sets_flag_in_same_acquisition() {
+        let mut q = QueueState::default();
+        assert!(mark_stopping(&mut q, None).is_err(), "沒有執行中任務不能停止");
+        q.running = Some(running_task(1, false, Some(10)));
+        assert_eq!(mark_stopping(&mut q, None).unwrap_err(), "前景任務請直接關閉其終端機視窗");
+        q.running = Some(running_task(3, true, None));
+        assert!(mark_stopping(&mut q, None).is_err(), "無 pid 無法停止");
+        assert!(!q.running.as_ref().unwrap().stopping, "失敗路徑不得標記 stopping");
+        q.running = Some(running_task(2, true, Some(4321)));
+        assert_eq!(mark_stopping(&mut q, None).unwrap(), (2, 4321));
+        assert!(q.running.as_ref().unwrap().stopping, "成功時必須同次持鎖標記 stopping");
+    }
+
+    /// M4:任務已換手(running.id != 預期 id)→ 不可殺到接續的新任務。
+    #[test]
+    fn mark_stopping_rejects_stale_task_id() {
+        let mut q = QueueState { running: Some(running_task(7, true, Some(111))), ..Default::default() };
+        assert_eq!(mark_stopping(&mut q, Some(6)).unwrap_err(), "任務已結束");
+        assert!(!q.running.as_ref().unwrap().stopping, "換手時不得標記新任務");
+        assert_eq!(mark_stopping(&mut q, Some(7)).unwrap(), (7, 111), "id 相符照常停止");
+    }
+
+    /// M3:handle_task_exit 以此判斷「使用者主動停止」→ 不報任務失敗。
+    #[test]
+    fn task_was_stopping_reads_flag_from_running() {
+        let st = state();
+        assert!(!task_was_stopping(&st), "沒有 running → 非主動停止");
+        st.queue.lock().unwrap().running = Some(running_task(1, true, Some(42)));
+        assert!(!task_was_stopping(&st));
+        st.queue.lock().unwrap().running.as_mut().unwrap().stopping = true;
+        assert!(task_was_stopping(&st));
+    }
+
+    /// M1:save_settings 只接受 6 個 UI 欄位;server-side 欄位以記憶體現值為準。
+    #[test]
+    fn overlay_ui_fields_keeps_server_side_state() {
+        let current = Settings {
+            history: vec!["真實歷史".into()],
+            signin_state: SigninState::Yes,
+            known_subscription_models: vec!["minimax-m2.7:cloud".into()],
+            ..Default::default()
+        };
+        let incoming = Settings {
+            hotkey: "Ctrl+Alt+Space".into(),
+            model: "qwen3-coder-next:cloud".into(),
+            cautious_mode: true,
+            background_mode: true,
+            working_dir: r"C:\work".into(),
+            autostart: false,
+            // 前端的舊快照 — 必須被忽略
+            history: vec!["stale".into()],
+            signin_state: SigninState::No,
+            known_subscription_models: vec!["stale:cloud".into()],
+        };
+        let merged = overlay_ui_fields(&current, &incoming);
+        assert_eq!(merged.hotkey, "Ctrl+Alt+Space");
+        assert_eq!(merged.model, "qwen3-coder-next:cloud");
+        assert!(merged.cautious_mode);
+        assert!(merged.background_mode);
+        assert_eq!(merged.working_dir, r"C:\work");
+        assert!(!merged.autostart);
+        assert_eq!(merged.history, vec!["真實歷史".to_string()], "history 以記憶體為準");
+        assert_eq!(merged.signin_state, SigninState::Yes, "signin_state 以記憶體為準");
+        assert_eq!(
+            merged.known_subscription_models,
+            vec!["minimax-m2.7:cloud".to_string()],
+            "tier learning 以記憶體為準"
+        );
+    }
+
+    /// M2:同一時間只允許一個 in-flight plan 抓取;結束後可再抓。
+    #[test]
+    fn plan_fetch_inflight_guard_blocks_second_and_clears() {
+        assert!(try_begin_plan_fetch(), "閒置時可開始抓取");
+        assert!(!try_begin_plan_fetch(), "in-flight 期間必須跳過");
+        end_plan_fetch();
+        assert!(try_begin_plan_fetch(), "結束(成功或失敗)後可再次抓取");
+        end_plan_fetch();
     }
 
     #[test]
