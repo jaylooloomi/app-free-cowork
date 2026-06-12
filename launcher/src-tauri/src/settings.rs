@@ -16,6 +16,9 @@ pub struct Settings {
     pub autostart: bool,
     pub history: Vec<String>,
     pub signin_state: SigninState,
+    /// 執行時學到「需要付費訂閱」的模型(403 requires a subscription)。
+    /// 模型選單據此標示 tier;serde default 讓舊設定檔可無痛升級。
+    pub known_subscription_models: Vec<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -28,6 +31,7 @@ impl Default for Settings {
             autostart: true,
             history: Vec::new(),
             signin_state: SigninState::Unknown,
+            known_subscription_models: Vec::new(),
         }
     }
 }
@@ -122,6 +126,15 @@ mod tests {
         let partial = load(&p);
         assert_eq!(partial.hotkey, "Ctrl+Alt+Space");
         assert_eq!(partial.model, "minimax-m2.5:cloud");
+        assert!(partial.known_subscription_models.is_empty(), "v1 settings without the field must default to empty");
+    }
+    #[test]
+    fn known_subscription_models_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("settings.json");
+        let s = Settings { known_subscription_models: vec!["minimax-m2.7:cloud".into()], ..Default::default() };
+        save(&p, &s).unwrap();
+        assert_eq!(load(&p).known_subscription_models, vec!["minimax-m2.7:cloud".to_string()]);
     }
     #[test]
     fn overwrite_path_regression() {

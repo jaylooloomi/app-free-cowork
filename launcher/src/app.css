@@ -4,6 +4,23 @@ body {
   background: #181818;
 }
 
+/* Palette-only opt-ins, toggled by JS depending on whether the OS acrylic
+   effect was applied (fx::EFFECTS_APPLIED). Wizard/settings never set these,
+   so they keep the default #181818 above. */
+body.fx-glass {
+  background: transparent;
+}
+
+/* html 的背景會繪滿整個 canvas(蓋在 body 後面),不一併透明的話
+   acrylic 仍會被 #181818 擋住。:has() 在 WebView2 (Chromium 105+) 可用。 */
+html:has(body.fx-glass) {
+  background: transparent;
+}
+
+body.fx-solid {
+  background: #181818;
+}
+
 * {
   box-sizing: border-box;
   font-family: "Segoe UI", "Microsoft JhengHei", sans-serif;

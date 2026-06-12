@@ -18,6 +18,11 @@ pub fn parse_cloud_models(api_tags_json: &str) -> Option<Vec<String>> {
 pub const FALLBACKS: [&str; 2] = ["minimax-m2.5:cloud", "qwen3-coder-next:cloud"];
 pub const CATALOG_URL: &str = "https://ollama.com/api/tags";
 
+/// Models empirically verified to respond on the free plan (2026-06-12).
+/// Used by the model picker to label tiers; anything not listed here and not
+/// learned as subscription-gated at runtime is shown as "unknown".
+pub const VERIFIED_FREE: [&str; 3] = ["minimax-m2.5:cloud", "qwen3-coder-next:cloud", "glm-4.7:cloud"];
+
 /// 回傳 (要用的模型, 若有改動的中文通知)。catalog 為空(離線/未取得)時不改動。
 pub fn choose_model(configured: &str, catalog: &[String]) -> (String, Option<String>) {
     if catalog.is_empty() || catalog.iter().any(|c| c == configured) {

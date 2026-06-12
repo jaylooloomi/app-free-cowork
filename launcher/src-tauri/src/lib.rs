@@ -2,15 +2,16 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod command;
 pub mod doctor;
+pub mod fx;
 pub mod http;
 pub mod ipc;
 pub mod launcher;
 pub mod logging;
 pub mod settings;
 pub mod version;
+pub mod voice;
 
 use ipc::AppState;
-use std::sync::Mutex;
 use tauri::{AppHandle, Emitter as _, Manager};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -41,6 +42,11 @@ fn show_palette_centered(app: &AppHandle) {
         // 已顯示 → 只取焦點;不重新定位、不重發 palette-shown(避免清空使用者輸入)
         if w.is_visible().unwrap_or(false) {
             let _ = w.set_focus();
+            // Alt+H 第二次按下(面板已開)→ 啟動 Windows 語音輸入(Win+H)
+            let app2 = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = ipc::start_voice_input(app2).await;
+            });
             return;
         }
         // Lazy catalog refresh: recover from offline-at-boot
@@ -137,11 +143,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .manage(AppState {
-            settings: Mutex::new(loaded.clone()),
-            pending_prompt: Mutex::new(None),
-            catalog_cache: Mutex::new(Vec::new()),
-        })
+        .manage(AppState::new(loaded.clone()))
         .invoke_handler(tauri::generate_handler![
             ipc::get_settings,
             ipc::save_settings,
@@ -154,7 +156,14 @@ pub fn run() {
             ipc::list_cloud_models,
             ipc::open_logs,
             ipc::hide_palette,
-            ipc::open_settings_window
+            ipc::open_settings_window,
+            ipc::queue_list,
+            ipc::queue_cancel,
+            ipc::task_stop,
+            ipc::list_models_ui,
+            ipc::set_model,
+            ipc::open_url,
+            ipc::start_voice_input
         ])
         .on_window_event(|window, event| {
             // 三個視窗都只隱藏、永不關閉 — 否則 X 會銷毀視窗導致 app 結束
@@ -164,6 +173,9 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            if let Some(w) = app.get_webview_window("palette") {
+                fx::apply_palette_effects(&w);
+            }
             let handle = app.handle().clone();
             if let Err(e) = register_hotkey(&handle, &loaded.hotkey) {
                 notify(&handle, &e);
@@ -171,6 +183,7 @@ pub fn run() {
             }
             sync_autostart(&handle, loaded.autostart);
             refresh_catalog(handle.clone());
+            ipc::refresh_plan(handle.clone());
             build_tray(&handle)?;
             let argv: Vec<String> = std::env::args().collect();
             handle_argv(&handle, &argv);

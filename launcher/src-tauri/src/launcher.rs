@@ -65,22 +65,19 @@ pub fn classify_failure(log_tail: &str) -> FailureKind {
     }
 }
 
-/// Spawn contract:
-/// - Background path: `on_done(code, log_path)` is ALWAYS called when the process exits.
-/// - Foreground path: `on_done(code, log_path)` is called ONLY IF `code != 0` AND the process
-///   exited within 30 seconds of spawn (fast-failure heuristic).  A long-running session that
-///   the user closes manually — including by closing the console window, which on Windows
-///   yields a nonzero exit code — must NOT trigger a notification.  Foreground has no real log;
-///   log_path is passed through so callers can construct messages uniformly (the file will be
-///   empty / non-existent).
-///
-/// Note: A test for the "foreground slow exit → on_done NOT called" case is omitted because it
-/// would require a 30-second wait, making the test suite impractical.
-pub fn spawn(
-    spec: &LaunchSpec,
-    log_path: PathBuf,
-    on_done: Option<Box<dyn FnOnce(i32, PathBuf) + Send>>,
-) -> std::io::Result<()> {
+/// Waiter callback: (exit code, log path, elapsed since spawn).
+pub type OnDone = Box<dyn FnOnce(i32, PathBuf, std::time::Duration) + Send>;
+
+/// Spawn contract (v1.1):
+/// - Returns the child PID (used by `task_stop` to `taskkill` background tasks).
+/// - For BOTH modes the waiter thread ALWAYS calls `on_done(code, log_path, elapsed)`
+///   when the process exits — task-queue chaining needs to observe every exit.
+///   Notification policy (e.g. "foreground fast-fail", "stay silent when the user
+///   closes a long-running console") lives in the caller (ipc), which decides
+///   using `code`, `elapsed` and the launch mode.
+/// - Foreground has no real log; log_path is passed through so callers can
+///   construct messages uniformly (the file will be empty / non-existent).
+pub fn spawn(spec: &LaunchSpec, log_path: PathBuf, on_done: Option<OnDone>) -> std::io::Result<u32> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(&spec.program);
@@ -92,26 +89,19 @@ pub fn spawn(
             .stdin(Stdio::null())
             .stdout(log)
             .stderr(log2);
-        let mut child = cmd.spawn()?;
-        std::thread::spawn(move || {
-            let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-            if let Some(f) = on_done {
-                f(code, log_path);
-            }
-        });
     } else {
-        let start = std::time::Instant::now();
-        let mut child = cmd.creation_flags(CREATE_NEW_CONSOLE).spawn()?;
-        std::thread::spawn(move || {
-            let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-            if code != 0 && start.elapsed() < std::time::Duration::from_secs(30) {
-                if let Some(f) = on_done {
-                    f(code, log_path);
-                }
-            }
-        });
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
     }
-    Ok(())
+    let start = std::time::Instant::now();
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        if let Some(f) = on_done {
+            f(code, log_path, start.elapsed());
+        }
+    });
+    Ok(pid)
 }
 
 #[cfg(test)]
@@ -133,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_fast_fail_calls_on_done() {
+    fn foreground_fast_fail_calls_on_done_with_elapsed() {
         use std::sync::mpsc;
         let dir = tempfile::tempdir().unwrap();
         // log_path for foreground is unused (file may not exist) — pass a path in a writable dir
@@ -145,12 +135,35 @@ mod tests {
             background: false,
         };
         let (tx, rx) = mpsc::channel();
-        spawn(&spec, log.clone(), Some(Box::new(move |code, path| {
-            tx.send((code, path)).unwrap();
+        spawn(&spec, log.clone(), Some(Box::new(move |code, path, elapsed| {
+            tx.send((code, path, elapsed)).unwrap();
         }))).unwrap();
-        // cmd /c exit 7 exits in <<1 second — well within 30s fast-fail window
-        let (code, _path) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+        // cmd /c exit 7 exits in <<1 second — caller would classify this as fast-fail
+        let (code, _path, elapsed) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
         assert_eq!(code, 7);
+        assert!(elapsed < std::time::Duration::from_secs(15), "elapsed should reflect actual runtime; got {elapsed:?}");
+    }
+
+    #[test]
+    fn foreground_normal_exit_calls_on_done() {
+        use std::sync::mpsc;
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("fg-ok.log");
+        let spec = LaunchSpec {
+            program: "cmd".into(),
+            args: vec!["/c".into(), "exit 0".into()],
+            cwd: dir.path().to_path_buf(),
+            background: false,
+        };
+        let (tx, rx) = mpsc::channel();
+        let pid = spawn(&spec, log, Some(Box::new(move |code, _path, elapsed| {
+            tx.send((code, elapsed)).unwrap();
+        }))).unwrap();
+        assert!(pid > 0, "spawn must return the child PID");
+        // v1.1 contract: waiter fires on EVERY exit (queue chaining), even foreground code 0
+        let (code, elapsed) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+        assert_eq!(code, 0);
+        assert!(elapsed < std::time::Duration::from_secs(15));
     }
 
     #[test]
@@ -227,7 +240,7 @@ mod tests {
             background: true,
         };
         let (tx, rx) = mpsc::channel();
-        spawn(&spec, log.clone(), Some(Box::new(move |code, path| { tx.send((code, path)).unwrap(); }))).unwrap();
+        spawn(&spec, log.clone(), Some(Box::new(move |code, path, _elapsed| { tx.send((code, path)).unwrap(); }))).unwrap();
         let (code, path) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
         assert_eq!(code, 3);
         let content = std::fs::read_to_string(&path).unwrap();
