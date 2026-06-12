@@ -628,6 +628,14 @@ pub fn open_url(url: String) -> Result<(), String> {
     SystemRunner.spawn_detached("explorer", &[&url]).map_err(|e| e.to_string())
 }
 
+// ---------- v1.1: acrylic effect state ----------
+
+/// 前端據此決定玻璃(fx-glass)或純色(fx-solid)樣式。
+#[tauri::command]
+pub fn effects_applied() -> bool {
+    crate::fx::effects_applied()
+}
+
 // ---------- v1.1: account plan (/api/me) ----------
 
 pub const API_ME_URL: &str = "http://127.0.0.1:11434/api/me";

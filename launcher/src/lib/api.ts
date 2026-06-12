@@ -15,6 +15,30 @@ export interface StatusDto {
   state: "ready" | "needs_setup" | "degraded" | "offline";
   model: string;
   detail: string;
+  /** 帳號方案("free"/"pro"/"max"…);null = 尚未取得 */
+  plan: string | null;
+}
+
+export interface QueuedTask {
+  id: number;
+  prompt: string;
+}
+
+export interface RunningTask {
+  id: number;
+  prompt: string;
+  background: boolean;
+  pid: number | null;
+}
+
+export interface QueueDto {
+  running: RunningTask | null;
+  queued: QueuedTask[];
+}
+
+export interface ModelEntry {
+  name: string;
+  tier: "free" | "subscription" | "unknown";
 }
 
 export interface StepResult {
@@ -31,8 +55,20 @@ export const api = {
   saveSettings: (newSettings: Settings) => invoke<void>("save_settings", { newSettings }),
   getStatus: () => invoke<StatusDto>("get_status"),
   getHistory: () => invoke<string[]>("get_history"),
-  /** 回傳 "launched" | "wizard";失敗時 reject(中文訊息)。 */
+  /** 回傳 "launched" | "queued" | "wizard";失敗時 reject(中文訊息)。"queued" 不會隱藏面板。 */
   submitPrompt: (prompt: string) => invoke<string>("submit_prompt", { prompt }),
+  queueList: () => invoke<QueueDto>("queue_list"),
+  queueCancel: (id: number) => invoke<void>("queue_cancel", { id }),
+  /** 僅背景任務可停止;前景/閒置時 reject(中文訊息)。 */
+  taskStop: () => invoke<void>("task_stop"),
+  listModelsUi: () => invoke<ModelEntry[]>("list_models_ui"),
+  setModel: (name: string) => invoke<void>("set_model", { name }),
+  /** 僅白名單網址(ollama.com/settings、ollama.com/upgrade)。 */
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
+  /** 後端會聚焦面板並送出 Win+H 啟動 Windows 語音輸入。 */
+  startVoiceInput: () => invoke<void>("start_voice_input"),
+  /** OS acrylic 效果是否真的套上(決定 fx-glass / fx-solid)。 */
+  effectsApplied: () => invoke<boolean>("effects_applied"),
   wizardPlan: () => invoke<WizardPlan>("wizard_plan"),
   wizardRun: (step: string) => invoke<StepResult>("wizard_run", { step }),
   wizardDone: () => invoke<void>("wizard_done"),

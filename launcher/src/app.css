@@ -2,6 +2,10 @@ html,
 body {
   margin: 0;
   background: #181818;
+  /* Palette 表面樣式變數 — 預設(含尚未判定 fx 模式時)為純色,
+     body.fx-glass 才切換成半透明,讓 OS acrylic 透出來。 */
+  --panel-bg: #1e1e1e;
+  --panel-border: #444;
 }
 
 /* Palette-only opt-ins, toggled by JS depending on whether the OS acrylic
@@ -9,6 +13,8 @@ body {
    so they keep the default #181818 above. */
 body.fx-glass {
   background: transparent;
+  --panel-bg: rgba(30, 30, 40, 0.5);
+  --panel-border: rgba(255, 255, 255, 0.12);
 }
 
 /* html 的背景會繪滿整個 canvas(蓋在 body 後面),不一併透明的話

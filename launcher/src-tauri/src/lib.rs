@@ -163,7 +163,8 @@ pub fn run() {
             ipc::list_models_ui,
             ipc::set_model,
             ipc::open_url,
-            ipc::start_voice_input
+            ipc::start_voice_input,
+            ipc::effects_applied
         ])
         .on_window_event(|window, event| {
             // 三個視窗都只隱藏、永不關閉 — 否則 X 會銷毀視窗導致 app 結束
