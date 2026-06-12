@@ -206,14 +206,17 @@ pub fn do_launch(app: &AppHandle, state: &State<AppState>, prompt: &str) -> Resu
                 })
                 .unwrap_or_default();
             if !is_background && tail.is_empty() {
-                // Foreground fast-fail with no log output — could be quota or auth
+                // Foreground fast-fail with no log output — could be subscription/quota/auth
                 let msg = format!(
-                    "啟動後立即失敗 (exit {code}),可能是額度用盡或登入失效"
+                    "啟動後立即失敗 (exit {code}),可能是模型需訂閱、額度用盡或登入失效"
                 );
                 crate::notify(&app2, &msg);
                 return;
             }
             match launcher::classify_failure(&tail) {
+                launcher::FailureKind::Subscription => {
+                    crate::notify(&app2, "此模型需要付費訂閱 — 請到設定改用免費模型(如 minimax-m2.5:cloud)");
+                }
                 launcher::FailureKind::Quota => {
                     crate::notify(&app2, "免費額度已用完,稍後重置(限制綁帳號,換模型無效)");
                 }

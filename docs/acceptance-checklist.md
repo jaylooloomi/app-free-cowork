@@ -7,7 +7,7 @@
 
 - [ ] 雙擊 `launcher\src-tauri\target\release\bundle\nsis\Free Claude Code_0.1.0_x64-setup.exe` 安裝(應無 UAC 提示)
 - [ ] 安裝後按 `Alt+H` → 輸入面板彈出、游標已聚焦
-- [ ] 狀態列顯示「就緒 · minimax-m2.7:cloud」(或設定的模型)
+- [ ] 狀態列顯示「就緒 · minimax-m2.5:cloud」(或設定的模型)
 - [ ] 輸入「幫我整理桌面,並且建立資料夾分類」→ Enter → 跳出終端機視窗、Claude 開始工作
   - ⚠️ 建議先用測試資料夾:設定 → 工作目錄 指到一個拋棄式資料夾再測
 - [ ] 終端機裡的互動介面正常(可打字續聊)— 這項只能在**安裝版**驗證,dev 模式行為不同

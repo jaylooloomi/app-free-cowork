@@ -12,7 +12,10 @@ pub fn parse_cloud_models(api_tags_json: &str) -> Option<Vec<String>> {
         .collect())
 }
 
-pub const FALLBACKS: [&str; 2] = ["minimax-m2.7:cloud", "qwen3-coder-next:cloud"];
+/// Free-tier access verified empirically 2026-06-12: minimax-m2.5, qwen3-coder-next
+/// and glm-4.7 respond on the free plan; minimax-m2.7 is subscription-gated
+/// (HTTP 403 "this model requires a subscription") — never default to it.
+pub const FALLBACKS: [&str; 2] = ["minimax-m2.5:cloud", "qwen3-coder-next:cloud"];
 pub const CATALOG_URL: &str = "https://ollama.com/api/tags";
 
 /// 回傳 (要用的模型, 若有改動的中文通知)。catalog 為空(離線/未取得)時不改動。
@@ -44,11 +47,11 @@ mod tests {
     }
     #[test]
     fn choose_model_prefers_configured_then_fallbacks_then_first() {
-        let cat: Vec<String> = vec!["minimax-m2.7:cloud".into(), "qwen3-coder-next:cloud".into(), "glm-5:cloud".into()];
-        let (m, notice) = choose_model("minimax-m2.7:cloud", &cat);
-        assert_eq!(m, "minimax-m2.7:cloud"); assert!(notice.is_none());
+        let cat: Vec<String> = vec!["minimax-m2.5:cloud".into(), "qwen3-coder-next:cloud".into(), "glm-5:cloud".into()];
+        let (m, notice) = choose_model("minimax-m2.5:cloud", &cat);
+        assert_eq!(m, "minimax-m2.5:cloud"); assert!(notice.is_none());
         let (m, notice) = choose_model("dead-model:cloud", &cat);
-        assert_eq!(m, "minimax-m2.7:cloud"); assert!(notice.is_some());
+        assert_eq!(m, "minimax-m2.5:cloud"); assert!(notice.is_some());
         let cat2: Vec<String> = vec!["glm-5:cloud".into()];
         let (m, notice) = choose_model("dead-model:cloud", &cat2);
         assert_eq!(m, "glm-5:cloud"); assert!(notice.is_some());

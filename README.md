@@ -10,7 +10,7 @@ Free Claude Code 是一個 Windows 系統匣常駐啟動器(Tauri v2)。按下 `
 
 **首次使用唯一需要手動完成的步驟:**前往 [ollama.com](https://ollama.com) 以瀏覽器免費註冊/登入帳號。之後一切自動進行。
 
-> **模型說明:**本工具透過 Ollama 雲端平台使用開源模型(如 minimax-m2.7、qwen3-coder-next 等),並非 Anthropic 官方 Claude 商業模型。Ollama 免費額度受 GPU 時間限制,使用量較大時可能需要等待配額重置。
+> **模型說明:**本工具透過 Ollama 雲端平台使用開源模型(預設 minimax-m2.5;部分新模型如 minimax-m2.7 需付費訂閱),並非 Anthropic 官方 Claude 商業模型。Ollama 免費額度受 GPU 時間限制,使用量較大時可能需要等待配額重置。
 
 ---
 

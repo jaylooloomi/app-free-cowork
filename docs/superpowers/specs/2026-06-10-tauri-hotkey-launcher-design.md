@@ -18,7 +18,7 @@
 | 技術路線 | Tauri v2 系統匣常駐 app(方案三) |
 | 快捷鍵 | 預設 `Alt+H`,可在設定改(註:與 Office 功能區衝突,設定頁註記) |
 | 執行呈現 | 預設開終端機視窗即時看 Claude 工作;設定可切背景模式 |
-| 預設模型 | `minimax-m2.7:cloud`,設定可改,自動 fallback |
+| 預設模型 | ~~`minimax-m2.7:cloud`~~ → `minimax-m2.5:cloud`(2026-06-12 修訂:實測 m2.7 為訂閱模型,403),設定可改,自動 fallback |
 | 權限模式 | 預設 `--dangerously-skip-permissions`(零打擾);設定提供「謹慎模式」開關(切回 `--permission-mode acceptEdits`) |
 | 遙測 | 零遙測,當賣點 |
 

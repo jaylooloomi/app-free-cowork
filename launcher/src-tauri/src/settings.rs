@@ -89,7 +89,7 @@ mod tests {
     fn defaults_are_per_spec() {
         let s = Settings::default();
         assert_eq!(s.hotkey, "Alt+H");
-        assert_eq!(s.model, "minimax-m2.7:cloud");
+        assert_eq!(s.model, "minimax-m2.5:cloud");
         assert!(!s.cautious_mode);
         assert!(!s.background_mode);
         assert_eq!(s.working_dir, "");
@@ -121,7 +121,7 @@ mod tests {
         std::fs::write(&p, r#"{"hotkey":"Ctrl+Alt+Space"}"#).unwrap();
         let partial = load(&p);
         assert_eq!(partial.hotkey, "Ctrl+Alt+Space");
-        assert_eq!(partial.model, "minimax-m2.7:cloud");
+        assert_eq!(partial.model, "minimax-m2.5:cloud");
     }
     #[test]
     fn overwrite_path_regression() {

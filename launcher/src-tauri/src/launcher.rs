@@ -43,6 +43,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, PartialEq)]
 pub enum FailureKind {
+    /// Model is gated behind a paid Ollama plan (403 "requires a subscription").
+    Subscription,
     Quota,
     Auth,
     Other,
@@ -50,7 +52,11 @@ pub enum FailureKind {
 
 pub fn classify_failure(log_tail: &str) -> FailureKind {
     let t = log_tail.to_lowercase();
-    if t.contains("429") || t.contains("usage limit") || t.contains("quota") || t.contains("rate limit") {
+    // Subscription check first: "requires a subscription" is more specific than
+    // the generic quota/auth tokens (verified live 2026-06-12 with minimax-m2.7).
+    if t.contains("requires a subscription") || t.contains("403") {
+        FailureKind::Subscription
+    } else if t.contains("429") || t.contains("usage limit") || t.contains("quota") || t.contains("rate limit") {
         FailureKind::Quota
     } else if t.contains("401") || t.contains("unauthorized") || t.contains("not signed in") || t.contains("signin") {
         FailureKind::Auth
@@ -119,6 +125,10 @@ mod tests {
         assert_eq!(classify_failure("...usage limit reached..."), FailureKind::Quota);
         assert_eq!(classify_failure("... 401 Unauthorized ..."), FailureKind::Auth);
         assert_eq!(classify_failure("...not signed in..."), FailureKind::Auth);
+        assert_eq!(
+            classify_failure("API Error: 403 this model requires a subscription, upgrade for access"),
+            FailureKind::Subscription
+        );
         assert_eq!(classify_failure("random crash"), FailureKind::Other);
     }
 
