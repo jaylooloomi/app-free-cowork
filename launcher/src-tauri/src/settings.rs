@@ -38,7 +38,9 @@ impl Default for Settings {
             hotkey: "Alt+H".into(),
             model: crate::catalog::FALLBACKS[0].to_string(),
             cautious_mode: false,
-            background_mode: false,
+            // 預設背景模式:不開終端機,輸出以 stream-json 即時串流回面板顯示
+            // (見 launcher::build_launch_spec / spawn 的串流路徑)。
+            background_mode: true,
             working_dir: String::new(),
             autostart: true,
             history: Vec::new(),
@@ -113,7 +115,7 @@ mod tests {
         assert_eq!(s.voice_hotkey, "Alt+J");
         assert_eq!(s.model, "minimax-m2.5:cloud");
         assert!(!s.cautious_mode);
-        assert!(!s.background_mode);
+        assert!(s.background_mode, "預設背景模式:無終端機 + 串流回顯");
         assert_eq!(s.working_dir, "");
         assert!(s.autostart);
         assert!(s.history.is_empty());

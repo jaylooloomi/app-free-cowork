@@ -272,7 +272,7 @@ pub fn save_pasted_image(data: Vec<u8>, ext: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: String) -> Result<String, String> {
     let prompt = prompt.trim().to_string();
-    let (signin_no, is_claude);
+    let (signin_no, is_claude, background_mode);
     {
         let mut s = state.settings.lock().unwrap();
         crate::i18n::set_locale(&s.locale);
@@ -283,6 +283,8 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
         let _ = settings::save(&settings::settings_path(), &s);
         signin_no = s.signin_state == SigninState::No;
         is_claude = s.model == catalog::CLAUDE_MODEL;
+        // 串流(背景)模式啟動後保留面板顯示輸出;前景模式仍隱藏(輸出在終端機)。
+        background_mode = s.background_mode;
     }
     // claude(Anthropic 帳號)路徑:跳過 Ollama signin/wizard,只確認 claude.exe 在。
     if is_claude {
@@ -299,7 +301,7 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
                 *state.pending_prompt.lock().unwrap() = None;
                 let task = new_task(&state, prompt);
                 let outcome = launch_or_enqueue(&app, task)?;
-                if outcome == "launched" {
+                if outcome == "launched" && !background_mode {
                     hide_window(&app, "palette");
                 }
                 Ok(outcome.into())
@@ -332,7 +334,7 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
             *state.pending_prompt.lock().unwrap() = None;
             let task = new_task(&state, prompt);
             let outcome = launch_or_enqueue(&app, task)?;
-            if outcome == "launched" {
+            if outcome == "launched" && !background_mode {
                 hide_window(&app, "palette");
             }
             Ok(outcome.into())
@@ -423,6 +425,42 @@ fn emit_queue_changed(app: &AppHandle) {
     }
 }
 
+/// 串流任務啟動:通知面板重置輸出區並進入「執行中」狀態。`gen` 是本次任務的
+/// 單調遞增 id;三個事件(start/output/end)都帶同一個 gen,前端據此忽略不同步
+/// /過期的事件 —— 即使跨任務的事件投遞順序有任何競爭,也不會把舊任務的輸出
+/// 混進新任務。必須在 spawn 之前發出,確保面板在第一行 stream-json 抵達前已清空。
+fn emit_task_output_start(app: &AppHandle, gen: u64) {
+    if let Some(w) = app.get_webview_window("palette") {
+        let _ = w.emit("task-output-start", gen);
+    }
+}
+
+/// 轉送一行 stream-json 給面板即時顯示。先過濾雜訊:只保留有展示價值的
+/// assistant(文字/工具呼叫)、user(工具結果)、result(最終結果)與
+/// post_turn_summary;system/init、hook、rate_limit 等不轉送(體積大且無展示意義)。
+fn emit_task_output(app: &AppHandle, gen: u64, line: &str) {
+    let keep = match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(v) => match v.get("type").and_then(|t| t.as_str()) {
+            Some("assistant") | Some("user") | Some("result") => true,
+            Some("system") => v.get("subtype").and_then(|s| s.as_str()) == Some("post_turn_summary"),
+            _ => false,
+        },
+        Err(_) => false, // 非 JSON(理論上不會發生於 stream-json)→ 丟棄
+    };
+    if keep {
+        if let Some(w) = app.get_webview_window("palette") {
+            let _ = w.emit("task-output", serde_json::json!({ "gen": gen, "line": line }));
+        }
+    }
+}
+
+/// 串流任務結束:通知面板收尾(若程序未吐 result 行就崩潰/被殺,前端據此停止轉圈)。
+fn emit_task_output_end(app: &AppHandle, gen: u64, code: i32) {
+    if let Some(w) = app.get_webview_window("palette") {
+        let _ = w.emit("task-output-end", serde_json::json!({ "gen": gen, "code": code }));
+    }
+}
+
 /// 啟動「已預約」的任務(前置條件:running 已是該任務的預約 — 由
 /// reserve_or_enqueue / pop_and_reserve_next 建立)。任何失敗都會在同一把鎖內
 /// 清掉預約並原子接續下一個佇列任務(pop_and_reserve_next),佇列不會卡死;
@@ -482,21 +520,49 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
     let dir = logging::logs_dir();
     logging::rotate(&dir, 30);
     let log = logging::new_run_log(&dir).map_err(|e| crate::i18n::log_create_failed(&e.to_string()))?;
+    // 本次任務的單調遞增 id 同時當作串流事件的世代號(gen)。
+    let gen = task.id;
     let app2 = app.clone();
     // 兩種模式 waiter 都會呼叫(spawn v1.1 契約):先處理通知,再接續佇列。
     let on_done: launcher::OnDone = Box::new(move |code, log_path, elapsed| {
         handle_task_exit(&app2, code, &log_path, elapsed, is_background, &model);
+        if is_background {
+            emit_task_output_end(&app2, gen, code);
+        }
         start_or_queue_next(&app2);
     });
-    {
+    // 背景(串流)模式:逐行把 stdout 的 stream-json 轉送給面板即時顯示。
+    let on_line: Option<launcher::OnLine> = if is_background {
+        let app_line = app.clone();
+        Some(Box::new(move |line: &str| emit_task_output(&app_line, gen, line)))
+    } else {
+        None
+    };
+    // 先重置面板輸出區(在 spawn 之前),再啟動,避免首行輸出早於 reset 而漏失。
+    if is_background {
+        emit_task_output_start(app, gen);
+    }
+    let spawn_result = {
         // 持鎖橫跨 spawn → 補 pid:waiter(handle_task_exit/start_or_queue_next)
         // 第一步就鎖 queue,因此「極速結束」也不會在 pid 寫入前清掉預約。
         let mut q = state.queue.lock().unwrap();
-        let pid = launcher::spawn(&spec, log, Some(on_done)).map_err(|e| crate::i18n::launch_failed(&e.to_string()))?;
-        if let Some(rt) = q.running.as_mut().filter(|rt| rt.id == task.id) {
-            rt.pid = Some(pid);
-            rt.background = is_background;
+        match launcher::spawn(&spec, log, Some(on_done), on_line) {
+            Ok(pid) => {
+                if let Some(rt) = q.running.as_mut().filter(|rt| rt.id == task.id) {
+                    rt.pid = Some(pid);
+                    rt.background = is_background;
+                }
+                Ok(())
+            }
+            Err(e) => Err(crate::i18n::launch_failed(&e.to_string())),
         }
+    };
+    // spawn 失敗:on_done 永不會觸發 → 必須在此補發 end,否則面板會卡在「執行中」。
+    if let Err(e) = spawn_result {
+        if is_background {
+            emit_task_output_end(app, gen, -1);
+        }
+        return Err(e);
     }
     Ok(())
 }

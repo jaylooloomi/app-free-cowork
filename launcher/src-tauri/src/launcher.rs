@@ -68,13 +68,26 @@ fn system_prompt_args(s: &Settings) -> Vec<String> {
     vec!["--append-system-prompt".into(), text]
 }
 
+/// 背景模式追加的 claude 參數:`-p` 啟用 print(非互動)模式;`--output-format
+/// stream-json --verbose` 讓 claude 逐行吐出 JSONL 事件,供面板即時解析顯示。
+/// stream-json 是 claude CLI 自己的輸出格式,與底層模型無關,故 ollama 透傳路徑
+/// (`ollama launch claude -- …`)同樣適用。
+fn background_args() -> Vec<String> {
+    vec![
+        "-p".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+    ]
+}
+
 pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec {
     // claude 哨符 → 直接跑 claude(用 Anthropic 帳號),不經 ollama、不帶 --model、
     // 不設 Ollama 環境變數。前景 = 互動;背景 = -p。
     if model == crate::catalog::CLAUDE_MODEL {
         let mut args: Vec<String> = system_prompt_args(s);
         if s.background_mode {
-            args.push("-p".into());
+            args.extend(background_args());
         }
         args.extend(permission_args(s));
         args.push(prompt.to_string());
@@ -97,7 +110,7 @@ pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec 
     ];
     args.extend(system_prompt_args(s));
     if s.background_mode {
-        args.push("-p".into());
+        args.extend(background_args());
     }
     args.extend(permission_args(s));
     args.push(prompt.to_string());
@@ -142,6 +155,11 @@ pub fn classify_failure(log_tail: &str) -> FailureKind {
 /// Waiter callback: (exit code, log path, elapsed since spawn).
 pub type OnDone = Box<dyn FnOnce(i32, PathBuf, std::time::Duration) + Send>;
 
+/// Per-stdout-line callback for streaming (background) launches. Called once per
+/// line of the child's stdout (one stream-json JSONL record), in order, on a
+/// reader thread. Used by ipc to forward output to the palette in real time.
+pub type OnLine = Box<dyn Fn(&str) + Send>;
+
 /// Spawn contract (v1.1):
 /// - Returns the child PID (used by `task_stop` to `taskkill` background tasks).
 /// - For BOTH modes the waiter thread ALWAYS calls `on_done(code, log_path, elapsed)`
@@ -151,7 +169,17 @@ pub type OnDone = Box<dyn FnOnce(i32, PathBuf, std::time::Duration) + Send>;
 ///   using `code`, `elapsed` and the launch mode.
 /// - Foreground has no real log; log_path is passed through so callers can
 ///   construct messages uniformly (the file will be empty / non-existent).
-pub fn spawn(spec: &LaunchSpec, log_path: PathBuf, on_done: Option<OnDone>) -> std::io::Result<u32> {
+/// `on_line` (streaming): when provided AND the launch is background, stdout is
+/// piped and read line-by-line — each line is appended to the log AND handed to
+/// `on_line` (in order). stderr is drained to the same log. This powers the live
+/// stream-json display in the palette. When `on_line` is None, background falls
+/// back to the simple "redirect both streams to the log file" path.
+pub fn spawn(
+    spec: &LaunchSpec,
+    log_path: PathBuf,
+    on_done: Option<OnDone>,
+    on_line: Option<OnLine>,
+) -> std::io::Result<u32> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(&spec.program);
@@ -159,7 +187,12 @@ pub fn spawn(spec: &LaunchSpec, log_path: PathBuf, on_done: Option<OnDone>) -> s
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
+
+    // 串流路徑:背景 + 有逐行回呼 → pipe stdout/stderr,逐行轉送並 tee 進 log。
     if spec.background {
+        if let Some(on_line) = on_line {
+            return spawn_streaming(cmd, log_path, on_done, on_line);
+        }
         let log = std::fs::File::create(&log_path)?;
         let log2 = log.try_clone()?;
         cmd.creation_flags(CREATE_NO_WINDOW)
@@ -174,6 +207,72 @@ pub fn spawn(spec: &LaunchSpec, log_path: PathBuf, on_done: Option<OnDone>) -> s
     let pid = child.id();
     std::thread::spawn(move || {
         let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        if let Some(f) = on_done {
+            f(code, log_path, start.elapsed());
+        }
+    });
+    Ok(pid)
+}
+
+/// Background streaming spawn: stdout piped → per-line `on_line` + tee to log;
+/// stderr piped → tee to the same log (shared behind a Mutex so the two reader
+/// threads never interleave-corrupt the file). The waiter joins both readers
+/// before firing `on_done`, so by completion the log is fully written and every
+/// line has been delivered.
+fn spawn_streaming(
+    mut cmd: std::process::Command,
+    log_path: PathBuf,
+    on_done: Option<OnDone>,
+    on_line: OnLine,
+) -> std::io::Result<u32> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::windows::process::CommandExt;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+
+    cmd.creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let start = std::time::Instant::now();
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let log = Arc::new(Mutex::new(std::fs::File::create(&log_path)?));
+
+    // 即使 mutex 曾因 panic 中毒(into_inner 取回守衛),仍持續寫 log:log 尾巴是
+    // 失敗分類(classify_failure)的唯一依據,絕不能因一次例外而靜默截斷。
+    fn append(log: &Mutex<std::fs::File>, line: &str) {
+        let mut f = log.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = writeln!(f, "{line}");
+    }
+
+    let log_out = log.clone();
+    let out_handle = std::thread::spawn(move || {
+        if let Some(out) = stdout {
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                append(&log_out, &line);
+                // on_line 會呼叫 Tauri emit;包 catch_unwind,單行回呼即使 panic
+                // 也不會中斷整個 stdout 讀取迴圈(否則後續輸出與 log 全部遺失)。
+                let _ = catch_unwind(AssertUnwindSafe(|| on_line(&line)));
+            }
+        }
+    });
+    let log_err = log.clone();
+    let err_handle = std::thread::spawn(move || {
+        if let Some(err) = stderr {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                append(&log_err, &line);
+            }
+        }
+    });
+
+    std::thread::spawn(move || {
+        let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        let _ = out_handle.join();
+        let _ = err_handle.join();
         if let Some(f) = on_done {
             f(code, log_path, start.elapsed());
         }
@@ -215,7 +314,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         spawn(&spec, log.clone(), Some(Box::new(move |code, path, elapsed| {
             tx.send((code, path, elapsed)).unwrap();
-        }))).unwrap();
+        })), None).unwrap();
         // cmd /c exit 7 exits in <<1 second — caller would classify this as fast-fail
         let (code, _path, elapsed) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
         assert_eq!(code, 7);
@@ -237,7 +336,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let pid = spawn(&spec, log, Some(Box::new(move |code, _path, elapsed| {
             tx.send((code, elapsed)).unwrap();
-        }))).unwrap();
+        })), None).unwrap();
         assert!(pid > 0, "spawn must return the child PID");
         // v1.1 contract: waiter fires on EVERY exit (queue chaining), even foreground code 0
         let (code, elapsed) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
@@ -248,7 +347,7 @@ mod tests {
     #[test]
     fn claude_model_runs_claude_directly_not_ollama() {
         // 前景:claude "<prompt>" + 權限旗標,完全不經 ollama / --model
-        let s = Settings::default();
+        let s = Settings { background_mode: false, ..Default::default() };
         let spec = build_launch_spec("看這張圖", &s, crate::catalog::CLAUDE_MODEL);
         assert_ne!(spec.program, "ollama");
         assert!(
@@ -293,17 +392,25 @@ mod tests {
         let sys = agent_system_prompt("zh-TW");
         let bg = Settings { background_mode: true, ..Default::default() };
         let spec = build_launch_spec("p", &bg, crate::catalog::CLAUDE_MODEL);
-        assert_eq!(spec.args, vec!["--append-system-prompt", sys, "-p", "--dangerously-skip-permissions", "p"]);
+        assert_eq!(
+            spec.args,
+            vec![
+                "--append-system-prompt", sys,
+                "-p", "--output-format", "stream-json", "--verbose",
+                "--dangerously-skip-permissions", "p"
+            ]
+        );
         assert!(spec.background);
 
-        let cautious = Settings { cautious_mode: true, ..Default::default() };
+        let cautious = Settings { cautious_mode: true, background_mode: false, ..Default::default() };
         let spec = build_launch_spec("p", &cautious, crate::catalog::CLAUDE_MODEL);
         assert_eq!(spec.args, vec!["--append-system-prompt", sys, "--permission-mode", "acceptEdits", "p"]);
     }
 
     #[test]
-    fn foreground_default_args() {
-        let s = Settings::default();
+    fn foreground_args() {
+        // 前景模式(非預設):無 -p、無 stream-json,直接互動式啟動
+        let s = Settings { background_mode: false, ..Default::default() };
         let spec = build_launch_spec("整理 \"桌面\" 並分類", &s, "minimax-m2.7:cloud");
         assert_eq!(spec.program, "ollama");
         assert_eq!(
@@ -326,7 +433,7 @@ mod tests {
 
     #[test]
     fn cautious_mode_swaps_permission_flag() {
-        let s = Settings { cautious_mode: true, ..Default::default() };
+        let s = Settings { cautious_mode: true, background_mode: false, ..Default::default() };
         let spec = build_launch_spec("p", &s, "m");
         assert_eq!(
             spec.args,
@@ -347,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn background_mode_adds_print_flag() {
+    fn background_mode_adds_streaming_flags() {
         let s = Settings { background_mode: true, ..Default::default() };
         let spec = build_launch_spec("p", &s, "m");
         assert_eq!(
@@ -362,6 +469,9 @@ mod tests {
                 "--append-system-prompt",
                 agent_system_prompt("zh-TW"),
                 "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
                 "--dangerously-skip-permissions",
                 "p"
             ]
@@ -382,12 +492,48 @@ mod tests {
             env: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
-        spawn(&spec, log.clone(), Some(Box::new(move |code, path, _elapsed| { tx.send((code, path)).unwrap(); }))).unwrap();
+        spawn(&spec, log.clone(), Some(Box::new(move |code, path, _elapsed| { tx.send((code, path)).unwrap(); })), None).unwrap();
         let (code, path) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
         assert_eq!(code, 3);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("out-line"), "log missing stdout; got: {content}");
         assert!(content.contains("err-line"), "log missing stderr; got: {content}");
+    }
+
+    #[test]
+    fn streaming_spawn_delivers_lines_and_tees_to_log() {
+        use std::sync::mpsc;
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("stream.log");
+        let spec = LaunchSpec {
+            program: "cmd".into(),
+            args: vec!["/c".into(), "echo line-a & echo line-b & echo err-x 1>&2 & exit 0".into()],
+            cwd: dir.path().to_path_buf(),
+            background: true,
+            env: Vec::new(),
+        };
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let lines2 = lines.clone();
+        let (tx, rx) = mpsc::channel();
+        spawn(
+            &spec,
+            log.clone(),
+            Some(Box::new(move |code, path, _| { tx.send((code, path)).unwrap(); })),
+            Some(Box::new(move |line: &str| { lines2.lock().unwrap().push(line.to_string()); })),
+        )
+        .unwrap();
+        // on_done fires only after the reader threads join → lines/log are complete here.
+        let (code, path) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+        assert_eq!(code, 0);
+        let captured = lines.lock().unwrap().clone();
+        assert!(captured.iter().any(|l| l.contains("line-a")), "on_line missing line-a; got {captured:?}");
+        assert!(captured.iter().any(|l| l.contains("line-b")), "on_line missing line-b; got {captured:?}");
+        // stderr is NOT delivered to on_line (stdout only)…
+        assert!(!captured.iter().any(|l| l.contains("err-x")), "on_line must only see stdout; got {captured:?}");
+        // …but BOTH streams are tee'd into the log for failure classification.
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("line-a") && content.contains("err-x"), "log missing tee'd output; got {content}");
     }
 
     #[test]

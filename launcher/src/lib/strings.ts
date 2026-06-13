@@ -61,6 +61,12 @@ const zhTW = {
   planTooltip: "查看用量與重置時間",
   micTooltip: (hk: string) => `語音輸入(說話轉文字;快捷鍵 ${hk})`,
   voiceHint: "語音輸入已啟動,請開始說話",
+  // ---------- 串流結果回顯 ----------
+  outputRunning: "執行中…",
+  outputDone: "完成",
+  outputFailed: "執行失敗",
+  outputDismiss: "清除結果",
+  outputWaiting: "已送出,等待回應…",
   attachRemoveTip: "移除這張圖片",
   attachHint: "圖片需搭配支援視覺的模型(如 qwen3-vl:235b-cloud)",
 };
@@ -132,6 +138,12 @@ const en = {
   planTooltip: "View usage and reset time",
   micTooltip: (hk: string) => `Voice input (speech to text; shortcut ${hk})`,
   voiceHint: "Voice input is active — start speaking",
+  // ---------- streaming output ----------
+  outputRunning: "Running…",
+  outputDone: "Done",
+  outputFailed: "Failed",
+  outputDismiss: "Dismiss result",
+  outputWaiting: "Submitted — waiting for a response…",
   attachRemoveTip: "Remove this image",
   attachHint: "Images require a vision-capable model (e.g. qwen3-vl:235b-cloud)",
 } satisfies Strings;

@@ -36,6 +36,18 @@
   // 貼上/拖入的圖片暫存路徑(送出時帶入 prompt)
   let attachments = $state<string[]>([]);
 
+  // 串流結果回顯(背景模式):後端把 claude 的 stream-json 逐行轉送過來,
+  // 前端解析後即時顯示助手文字、工具呼叫與最終結果。
+  let taskRunning = $state(false);
+  let taskText = $state(""); // 累積的助手文字(串流中)
+  let taskTools = $state<string[]>([]); // 工具呼叫摘要(🔧)
+  let taskResult = $state<string | null>(null); // result 行的最終文字
+  let taskError = $state(false);
+  let streamEl: HTMLElement | null = $state(null); // 串流文字區,用於自動捲到底
+  // 目前任務的世代號(= 後端 task id):只接受 gen 相符的串流事件,
+  // 避免跨任務事件投遞競爭把舊任務輸出混進新任務。
+  let activeGen = $state<number | null>(null);
+
   async function refresh() {
     try {
       history = await api.getHistory();
@@ -94,6 +106,9 @@
       dropdownOpen = false;
       attachments = [];
       scanProgress = null;
+      // 重新開啟面板時清掉「已完成」任務的舊輸出,回到乾淨狀態;
+      // 但若仍在執行中(背景任務尚未結束)則保留,讓使用者繼續看串流。
+      if (!taskRunning) resetTaskOutput(false);
       stopListening();
       refresh();
       refreshQueue();
@@ -118,19 +133,35 @@
       showTransient(S.modelScanDone(e.payload));
       refreshModels();
     });
+    // 串流回顯:任務啟動先記錄世代號並重置輸出區,逐行解析,結束時收尾。
+    // gen 不符的事件一律忽略(過期/跨任務競爭)。
+    const unlistenOutStart = listen<number>("task-output-start", (e) => {
+      activeGen = e.payload;
+      resetTaskOutput(true);
+    });
+    const unlistenOut = listen<{ gen: number; line: string }>("task-output", (e) => {
+      if (e.payload.gen !== activeGen) return;
+      onTaskLine(e.payload.line);
+    });
+    const unlistenOutEnd = listen<{ gen: number; code: number }>("task-output-end", (e) => {
+      if (e.payload.gen !== activeGen) return;
+      taskRunning = false;
+      // 程序非正常結束又沒吐 result 行(崩潰/被殺/spawn 失敗)→ 標記為失敗
+      if (taskResult === null && e.payload.code !== 0) taskError = true;
+    });
     // busy(任務送出中)時不自動隱藏 — 避免提交瞬間失焦把面板關掉
     const onBlur = () => {
       if (!busy) api.hidePalette().catch(() => {});
     };
     window.addEventListener("blur", onBlur);
-    // 視窗高度貼齊內容(佇列、模型選單):下限 110、上限 420。
+    // 視窗高度貼齊內容(佇列、模型選單、串流結果):下限 110、上限 520。
     // ResizeObserver 在 observe() 時會立刻送出初始觀測,首次顯示前就會收斂到內容高度。
     // 後端只設定位置、不設定大小,不會互相干擾。
     const win = getCurrentWindow();
     let lastH = 0;
     const ro = new ResizeObserver(() => {
       if (!rootEl) return;
-      const h = Math.min(420, Math.max(110, Math.ceil(rootEl.offsetHeight)));
+      const h = Math.min(520, Math.max(110, Math.ceil(rootEl.offsetHeight)));
       if (h !== lastH) {
         lastH = h;
         win.setSize(new LogicalSize(640, h)).catch(() => {});
@@ -142,6 +173,9 @@
       unlistenQueue.then((f) => f());
       unlistenScanProgress.then((f) => f());
       unlistenScanDone.then((f) => f());
+      unlistenOutStart.then((f) => f());
+      unlistenOut.then((f) => f());
+      unlistenOutEnd.then((f) => f());
       window.removeEventListener("blur", onBlur);
       ro.disconnect();
       clearTimeout(transientTimer);
@@ -174,11 +208,13 @@
         : input;
       // "launched"/"wizard" 時後端已隱藏面板;"queued" 保持開啟並提示已入列
       const outcome = await api.submitPrompt(fullPrompt);
-      if (outcome === "queued") {
+      // 背景(串流)模式啟動後面板保留顯示輸出 → 清空輸入,等下一個指令;
+      // 入列時同樣清空並提示。前景模式後端已隱藏面板,清空無妨。
+      if (outcome === "launched" || outcome === "queued") {
         input = "";
         attachments = [];
         hIndex = -1;
-        showTransient(S.queuedToast);
+        if (outcome === "queued") showTransient(S.queuedToast);
       }
     } catch (e) {
       error = String(e);
@@ -210,6 +246,52 @@
 
   function removeAttachment(i: number) {
     attachments = attachments.filter((_, idx) => idx !== i);
+  }
+
+  // ── 串流結果回顯 ──────────────────────────────────────────────────────────
+  // 把一個 tool_use 區塊濃縮成一行可讀摘要:工具名 + 最具代表性的參數。
+  function toolLabel(b: { name?: string; input?: Record<string, unknown> }): string {
+    const name = b.name ?? "tool";
+    const inp = b.input ?? {};
+    const raw =
+      inp.command ?? inp.file_path ?? inp.path ?? inp.pattern ?? inp.url ?? inp.description ?? "";
+    const detail = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim().slice(0, 64) : "";
+    return detail ? `${name}: ${detail}` : name;
+  }
+
+  // 解析一行 stream-json(後端已過濾掉雜訊,只會收到 assistant / user / result /
+  // post_turn_summary)。assistant 的文字累加顯示、tool_use 收進工具列;
+  // result 行帶最終文字與 is_error,作為收尾。
+  function onTaskLine(rawLine: string) {
+    let msg: { type?: string; message?: { content?: unknown[] }; result?: unknown; is_error?: boolean };
+    try {
+      msg = JSON.parse(rawLine);
+    } catch {
+      return;
+    }
+    if (msg.type === "assistant") {
+      for (const blk of msg.message?.content ?? []) {
+        const b = blk as { type?: string; text?: string; name?: string; input?: Record<string, unknown> };
+        if (b.type === "text" && typeof b.text === "string") taskText += b.text;
+        else if (b.type === "tool_use") taskTools = [...taskTools, toolLabel(b)];
+      }
+    } else if (msg.type === "result") {
+      taskResult = typeof msg.result === "string" ? msg.result : "";
+      taskError = !!msg.is_error;
+      taskRunning = false;
+    }
+  }
+
+  function resetTaskOutput(running: boolean) {
+    taskText = "";
+    taskTools = [];
+    taskResult = null;
+    taskError = false;
+    taskRunning = running;
+  }
+
+  function dismissOutput() {
+    resetTaskOutput(false);
   }
 
   // 解析快捷鍵字串(如 "Alt+J"、"Ctrl+Shift+M")並與 keydown 事件比對。
@@ -422,6 +504,16 @@
   const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
 
   const micTip = $derived(S.micTooltip(settings?.voice_hotkey || "Alt+J"));
+
+  // 串流中顯示累積文字;收到 result 行後改顯示其最終文字(兩者內容一致,避免重複)。
+  const displayText = $derived(taskResult ?? taskText);
+  const showOutput = $derived(taskRunning || taskResult !== null);
+  // 串流文字增長時自動捲到底,讓最新內容可見。
+  $effect(() => {
+    void displayText;
+    void taskTools.length;
+    if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
+  });
 </script>
 
 <svelte:window onkeydown={onGlobalKey} />
@@ -497,6 +589,32 @@
           </button>
         </div>
       {/each}
+    </div>
+  {/if}
+
+  <!-- 串流結果回顯:背景任務執行中即時顯示助手文字 / 工具呼叫,結束顯示最終結果 -->
+  {#if showOutput}
+    <div class="output" class:err={taskError}>
+      <div class="ohead">
+        <span class="ostat">
+          {#if taskRunning}
+            <span class="ospin" aria-hidden="true"></span>{S.outputRunning}
+          {:else}
+            {taskError ? S.outputFailed : S.outputDone}
+          {/if}
+        </span>
+        <button class="ox" onclick={dismissOutput} title={S.outputDismiss} aria-label={S.outputDismiss}>✕</button>
+      </div>
+      {#if taskTools.length}
+        <div class="otools">
+          {#each taskTools as t, i (i)}<span class="otool">🔧 {t}</span>{/each}
+        </div>
+      {/if}
+      {#if displayText}
+        <div class="ostream" bind:this={streamEl}>{displayText}</div>
+      {:else if taskRunning}
+        <div class="owait">{S.outputWaiting}</div>
+      {/if}
     </div>
   {/if}
 
@@ -584,6 +702,88 @@
   }
   .attach-hint {
     font-size: 11px;
+    color: #888;
+  }
+  /* ── 串流結果回顯 ── */
+  .output {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: var(--panel-bg);
+    padding: 8px 10px;
+  }
+  .output.err {
+    border-color: #f7768e;
+  }
+  .ohead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #9ece6a;
+  }
+  .output.err .ohead {
+    color: #f7768e;
+  }
+  .ostat {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ospin {
+    width: 10px;
+    height: 10px;
+    border: 2px solid #7aa2f7;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .ox {
+    border: none;
+    background: none;
+    color: #888;
+    font-size: 11px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+  }
+  .ox:hover {
+    color: #f7768e;
+  }
+  .otools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .otool {
+    font-size: 11px;
+    color: #bbb;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 5px;
+    padding: 2px 6px;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ostream {
+    font-size: 13px;
+    color: #e8e8e8;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+    max-height: 240px;
+    overflow: auto;
+  }
+  .owait {
+    font-size: 12px;
     color: #888;
   }
   .input-row {
