@@ -38,11 +38,35 @@ fn permission_args(s: &Settings) -> Vec<String> {
     }
 }
 
+/// 「動手型助手」系統提示:讓模型直接執行使用者要求,而不是只給指令或反問。
+/// 實測 Claude/Opus 預設偏向解釋;附加這段後會直接執行(如 Start-Process 開 App/網頁)。
+/// 危險操作仍由權限機制把關,所以兩種模式都附加。依介面語言給中/英。
+fn agent_system_prompt(locale: &str) -> &'static str {
+    if locale.eq_ignore_ascii_case("en") {
+        "You are a do-it desktop assistant on Windows. The user wants tasks DONE, not explained. \
+         You can run any PowerShell/Bash command and operate files. For requests like \"open X\", \
+         run it directly (e.g. Start-Process for apps/URLs) instead of telling the user how. \
+         Don't ask for confirmation and don't just give instructions — perform the action and \
+         report the result in one short line. (Risky operations are still gated by the permission system.)"
+    } else {
+        "你是 Windows 上的「動手型」桌面助手。使用者要的是把事情做完,不是教學或反問。\
+         你可以執行任何 PowerShell/Bash 指令、操作檔案。遇到「開啟 X」這類要求就直接執行\
+         (例如用 Start-Process 開啟應用程式或網址),不要只告訴使用者怎麼做。\
+         不要反問確認、不要只給指令 — 直接動手完成,並用一句話回報結果。\
+         (危險操作仍會由權限機制把關。)"
+    }
+}
+
+/// 把系統提示插在 claude 參數最前面:`--append-system-prompt <文字>`。
+fn system_prompt_args(s: &Settings) -> Vec<String> {
+    vec!["--append-system-prompt".into(), agent_system_prompt(&s.locale).into()]
+}
+
 pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec {
     // claude 哨符 → 直接跑 claude(用 Anthropic 帳號),不經 ollama、不帶 --model、
     // 不設 Ollama 環境變數。前景 = 互動;背景 = -p。
     if model == crate::catalog::CLAUDE_MODEL {
-        let mut args: Vec<String> = Vec::new();
+        let mut args: Vec<String> = system_prompt_args(s);
         if s.background_mode {
             args.push("-p".into());
         }
@@ -65,6 +89,7 @@ pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec 
         "--yes".into(),
         "--".into(),
     ];
+    args.extend(system_prompt_args(s));
     if s.background_mode {
         args.push("-p".into());
     }
@@ -225,7 +250,10 @@ mod tests {
             "program should be the claude binary, got {}",
             spec.program
         );
-        assert_eq!(spec.args, vec!["--dangerously-skip-permissions", "看這張圖"]);
+        assert_eq!(
+            spec.args,
+            vec!["--append-system-prompt", agent_system_prompt("zh-TW"), "--dangerously-skip-permissions", "看這張圖"]
+        );
         assert!(!spec.args.iter().any(|a| a == "launch" || a == "--model"));
         // 真 Claude 不限制輸出
         assert!(spec.env.is_empty());
@@ -243,14 +271,15 @@ mod tests {
 
     #[test]
     fn claude_model_background_and_cautious() {
+        let sys = agent_system_prompt("zh-TW");
         let bg = Settings { background_mode: true, ..Default::default() };
         let spec = build_launch_spec("p", &bg, crate::catalog::CLAUDE_MODEL);
-        assert_eq!(spec.args, vec!["-p", "--dangerously-skip-permissions", "p"]);
+        assert_eq!(spec.args, vec!["--append-system-prompt", sys, "-p", "--dangerously-skip-permissions", "p"]);
         assert!(spec.background);
 
         let cautious = Settings { cautious_mode: true, ..Default::default() };
         let spec = build_launch_spec("p", &cautious, crate::catalog::CLAUDE_MODEL);
-        assert_eq!(spec.args, vec!["--permission-mode", "acceptEdits", "p"]);
+        assert_eq!(spec.args, vec!["--append-system-prompt", sys, "--permission-mode", "acceptEdits", "p"]);
     }
 
     #[test]
@@ -267,6 +296,8 @@ mod tests {
                 "minimax-m2.7:cloud",
                 "--yes",
                 "--",
+                "--append-system-prompt",
+                agent_system_prompt("zh-TW"),
                 "--dangerously-skip-permissions",
                 "整理 \"桌面\" 並分類"
             ]
@@ -287,6 +318,8 @@ mod tests {
                 "m",
                 "--yes",
                 "--",
+                "--append-system-prompt",
+                agent_system_prompt("zh-TW"),
                 "--permission-mode",
                 "acceptEdits",
                 "p"
@@ -307,6 +340,8 @@ mod tests {
                 "m",
                 "--yes",
                 "--",
+                "--append-system-prompt",
+                agent_system_prompt("zh-TW"),
                 "-p",
                 "--dangerously-skip-permissions",
                 "p"
