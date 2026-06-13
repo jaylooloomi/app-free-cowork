@@ -7,7 +7,16 @@ pub struct LaunchSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub background: bool,
+    /// 額外環境變數(spawn 時套用)。Ollama 路徑會設 CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    /// 上限,避免小模型(輸出上限低於 Claude Code 預設 32000)回 400。
+    pub env: Vec<(String, String)>,
 }
+
+/// 安全的輸出上限:Claude Code 預設一次要 32000 output tokens,許多開源模型上限
+/// 較低(實測 rnj-1:8b 僅 16384)。設此上限讓「只是輸出上限低」的模型可用,且
+/// 對大模型無害(實測 minimax-m2.5 設 16384 仍正常)。只用於 Ollama 路徑;
+/// 真 Claude(Anthropic 帳號)不設限,保留完整能力。
+const OLLAMA_MAX_OUTPUT_TOKENS: &str = "16384";
 
 /// claude 的執行檔路徑:優先 `%USERPROFILE%\.local\bin\claude.exe`,否則靠 PATH。
 fn claude_program() -> String {
@@ -29,11 +38,41 @@ fn permission_args(s: &Settings) -> Vec<String> {
     }
 }
 
+/// 「動手型助手」系統提示:讓模型直接執行使用者要求,而不是只給指令或反問。
+/// 實測 Claude/Opus 預設偏向解釋;附加這段後會直接執行(如 Start-Process 開 App/網頁)。
+/// 危險操作仍由權限機制把關,所以兩種模式都附加。依介面語言給中/英。
+fn agent_system_prompt(locale: &str) -> &'static str {
+    if locale.eq_ignore_ascii_case("en") {
+        "You are a do-it desktop assistant on Windows. The user wants tasks DONE, not explained. \
+         You can run any PowerShell/Bash command and operate files. For requests like \"open X\", \
+         run it directly (e.g. Start-Process for apps/URLs) instead of telling the user how. \
+         Don't ask for confirmation and don't just give instructions — perform the action and \
+         report the result in one short line. (Risky operations are still gated by the permission system.)"
+    } else {
+        "你是 Windows 上的「動手型」桌面助手。使用者要的是把事情做完,不是教學或反問。\
+         你可以執行任何 PowerShell/Bash 指令、操作檔案。遇到「開啟 X」這類要求就直接執行\
+         (例如用 Start-Process 開啟應用程式或網址),不要只告訴使用者怎麼做。\
+         不要反問確認、不要只給指令 — 直接動手完成,並用一句話回報結果。\
+         (危險操作仍會由權限機制把關。)"
+    }
+}
+
+/// 把系統提示插在 claude 參數最前面:`--append-system-prompt <文字>`。
+/// 使用者自訂(settings.system_prompt 非空)優先,否則用內建的語言預設。
+fn system_prompt_args(s: &Settings) -> Vec<String> {
+    let text: String = if s.system_prompt.trim().is_empty() {
+        agent_system_prompt(&s.locale).into()
+    } else {
+        s.system_prompt.clone()
+    };
+    vec!["--append-system-prompt".into(), text]
+}
+
 pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec {
     // claude 哨符 → 直接跑 claude(用 Anthropic 帳號),不經 ollama、不帶 --model、
     // 不設 Ollama 環境變數。前景 = 互動;背景 = -p。
     if model == crate::catalog::CLAUDE_MODEL {
-        let mut args: Vec<String> = Vec::new();
+        let mut args: Vec<String> = system_prompt_args(s);
         if s.background_mode {
             args.push("-p".into());
         }
@@ -44,6 +83,7 @@ pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec 
             args,
             cwd: s.effective_working_dir(),
             background: s.background_mode,
+            env: Vec::new(), // 真 Claude 不限制輸出
         };
     }
 
@@ -55,6 +95,7 @@ pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec 
         "--yes".into(),
         "--".into(),
     ];
+    args.extend(system_prompt_args(s));
     if s.background_mode {
         args.push("-p".into());
     }
@@ -65,6 +106,7 @@ pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec 
         args,
         cwd: s.effective_working_dir(),
         background: s.background_mode,
+        env: vec![("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), OLLAMA_MAX_OUTPUT_TOKENS.into())],
     }
 }
 
@@ -114,6 +156,9 @@ pub fn spawn(spec: &LaunchSpec, log_path: PathBuf, on_done: Option<OnDone>) -> s
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args).current_dir(&spec.cwd);
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
     if spec.background {
         let log = std::fs::File::create(&log_path)?;
         let log2 = log.try_clone()?;
@@ -165,6 +210,7 @@ mod tests {
             args: vec!["/c".into(), "exit 7".into()],
             cwd: dir.path().to_path_buf(),
             background: false,
+            env: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         spawn(&spec, log.clone(), Some(Box::new(move |code, path, elapsed| {
@@ -186,6 +232,7 @@ mod tests {
             args: vec!["/c".into(), "exit 0".into()],
             cwd: dir.path().to_path_buf(),
             background: false,
+            env: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         let pid = spawn(&spec, log, Some(Box::new(move |code, _path, elapsed| {
@@ -209,20 +256,49 @@ mod tests {
             "program should be the claude binary, got {}",
             spec.program
         );
-        assert_eq!(spec.args, vec!["--dangerously-skip-permissions", "看這張圖"]);
+        assert_eq!(
+            spec.args,
+            vec!["--append-system-prompt", agent_system_prompt("zh-TW"), "--dangerously-skip-permissions", "看這張圖"]
+        );
         assert!(!spec.args.iter().any(|a| a == "launch" || a == "--model"));
+        // 真 Claude 不限制輸出
+        assert!(spec.env.is_empty());
+    }
+
+    #[test]
+    fn custom_system_prompt_overrides_default() {
+        // 預設(空)→ 用內建語言預設
+        let spec = build_launch_spec("p", &Settings::default(), "minimax-m2.5:cloud");
+        let i = spec.args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert_eq!(spec.args[i + 1], agent_system_prompt("zh-TW"));
+        // 自訂 → 用使用者的文字
+        let s = Settings { system_prompt: "只用注音回答".into(), ..Default::default() };
+        let spec = build_launch_spec("p", &s, "minimax-m2.5:cloud");
+        let i = spec.args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert_eq!(spec.args[i + 1], "只用注音回答");
+    }
+
+    #[test]
+    fn ollama_path_caps_max_output_tokens() {
+        // 小模型(輸出上限 < 32000)會 400;Ollama 路徑統一設 16384 上限
+        let spec = build_launch_spec("p", &Settings::default(), "minimax-m2.5:cloud");
+        assert!(spec
+            .env
+            .iter()
+            .any(|(k, v)| k == "CLAUDE_CODE_MAX_OUTPUT_TOKENS" && v == "16384"));
     }
 
     #[test]
     fn claude_model_background_and_cautious() {
+        let sys = agent_system_prompt("zh-TW");
         let bg = Settings { background_mode: true, ..Default::default() };
         let spec = build_launch_spec("p", &bg, crate::catalog::CLAUDE_MODEL);
-        assert_eq!(spec.args, vec!["-p", "--dangerously-skip-permissions", "p"]);
+        assert_eq!(spec.args, vec!["--append-system-prompt", sys, "-p", "--dangerously-skip-permissions", "p"]);
         assert!(spec.background);
 
         let cautious = Settings { cautious_mode: true, ..Default::default() };
         let spec = build_launch_spec("p", &cautious, crate::catalog::CLAUDE_MODEL);
-        assert_eq!(spec.args, vec!["--permission-mode", "acceptEdits", "p"]);
+        assert_eq!(spec.args, vec!["--append-system-prompt", sys, "--permission-mode", "acceptEdits", "p"]);
     }
 
     #[test]
@@ -239,6 +315,8 @@ mod tests {
                 "minimax-m2.7:cloud",
                 "--yes",
                 "--",
+                "--append-system-prompt",
+                agent_system_prompt("zh-TW"),
                 "--dangerously-skip-permissions",
                 "整理 \"桌面\" 並分類"
             ]
@@ -259,6 +337,8 @@ mod tests {
                 "m",
                 "--yes",
                 "--",
+                "--append-system-prompt",
+                agent_system_prompt("zh-TW"),
                 "--permission-mode",
                 "acceptEdits",
                 "p"
@@ -279,6 +359,8 @@ mod tests {
                 "m",
                 "--yes",
                 "--",
+                "--append-system-prompt",
+                agent_system_prompt("zh-TW"),
                 "-p",
                 "--dangerously-skip-permissions",
                 "p"
@@ -297,6 +379,7 @@ mod tests {
             args: vec!["/c".into(), "echo out-line & echo err-line 1>&2 & exit 3".into()],
             cwd: dir.path().to_path_buf(),
             background: true,
+            env: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         spawn(&spec, log.clone(), Some(Box::new(move |code, path, _elapsed| { tx.send((code, path)).unwrap(); }))).unwrap();

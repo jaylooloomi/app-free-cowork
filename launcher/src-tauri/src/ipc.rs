@@ -93,9 +93,10 @@ pub fn get_settings(state: State<AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 
-/// server-side overlay:以「目前記憶體設定」為底,只接受 UI 可編輯的 6 個欄位。
-/// history/signin_state/known_subscription_models 由後端在設定視窗開啟期間
-/// 持續更新(submit_prompt、tier learning、auth re-lock),不可被前端的舊快照蓋掉。
+/// server-side overlay:以「目前記憶體設定」為底,只接受 UI 可編輯的欄位
+/// (hotkey/model/cautious/background/working_dir/autostart/locale)。
+/// history/signin_state/known_*_models 由後端在設定視窗開啟期間持續更新
+/// (submit_prompt、tier learning、被動學習、掃描、auth re-lock),不可被前端的舊快照蓋掉。
 fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
     Settings {
         hotkey: incoming.hotkey.clone(),
@@ -104,9 +105,14 @@ fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
         background_mode: incoming.background_mode,
         working_dir: incoming.working_dir.clone(),
         autostart: incoming.autostart,
+        locale: incoming.locale.clone(),
+        voice_hotkey: incoming.voice_hotkey.clone(),
+        system_prompt: incoming.system_prompt.clone(),
         history: current.history.clone(),
         signin_state: current.signin_state.clone(),
         known_subscription_models: current.known_subscription_models.clone(),
+        known_free_models: current.known_free_models.clone(),
+        known_broken_models: current.known_broken_models.clone(),
     }
 }
 
@@ -130,6 +136,7 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
         let mut s = state.settings.lock().unwrap();
         let merged = overlay_ui_fields(&s, &new_settings);
         settings::save(&settings::settings_path(), &merged).map_err(|e| e.to_string())?;
+        crate::i18n::set_locale(&merged.locale);
         *s = merged;
     }
 
@@ -141,6 +148,7 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
 #[tauri::command]
 pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<StatusDto, String> {
     let s = state.settings.lock().unwrap().clone();
+    crate::i18n::set_locale(&s.locale);
 
     // claude(Anthropic 帳號)路徑:完全不碰 Ollama,只看 claude.exe 是否安裝。
     if s.model == catalog::CLAUDE_MODEL {
@@ -153,11 +161,9 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
         .map_err(|e| e.to_string())?;
         let (state_str, detail) = match claude_status {
             (doctor::Status::Ready, true) => ("ready", String::new()),
-            (doctor::Status::Ready, false) => {
-                ("ready", "尚未登入 Anthropic — 首次執行會在終端機要求 /login".to_string())
-            }
+            (doctor::Status::Ready, false) => ("ready", crate::i18n::claude_not_logged_in()),
             (doctor::Status::Degraded { reason }, _) => ("degraded", reason),
-            _ => ("degraded", "Claude 狀態未知".to_string()),
+            _ => ("degraded", crate::i18n::claude_status_unknown()),
         };
         return Ok(StatusDto {
             state: state_str.into(),
@@ -203,7 +209,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
                 return Ok(StatusDto {
                     state: "offline".into(),
                     model,
-                    detail: "離線 — 雲端模型需要網路連線".into(),
+                    detail: crate::i18n::offline_cloud_needs_network(),
                     plan,
                 });
             }
@@ -215,13 +221,19 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
             }
         }
     }
-    let (model, _) = catalog::choose_model(&s.model, &cat);
+    // 顯示「實際會用」的模型;若選中的不可用,switch_notice 提示已自動改用免費模型
+    let (model, switch_notice) = resolve_usable_model(&s, &cat);
     Ok(match status {
-        doctor::Status::Ready => StatusDto { state: "ready".into(), model, detail: String::new(), plan },
+        doctor::Status::Ready => StatusDto {
+            state: "ready".into(),
+            model,
+            detail: switch_notice.unwrap_or_default(),
+            plan,
+        },
         doctor::Status::NeedsSetup { .. } => StatusDto {
             state: "needs_setup".into(),
             model,
-            detail: "首次使用將自動安裝必要元件".into(),
+            detail: crate::i18n::first_run_will_install(),
             plan,
         },
         doctor::Status::Degraded { reason } => StatusDto { state: "degraded".into(), model, detail: reason, plan },
@@ -260,12 +272,13 @@ pub fn save_pasted_image(data: Vec<u8>, ext: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: String) -> Result<String, String> {
     let prompt = prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err("請輸入需求".into());
-    }
     let (signin_no, is_claude);
     {
         let mut s = state.settings.lock().unwrap();
+        crate::i18n::set_locale(&s.locale);
+        if prompt.is_empty() {
+            return Err(crate::i18n::empty_prompt());
+        }
         s.push_history(&prompt);
         let _ = settings::save(&settings::settings_path(), &s);
         signin_no = s.signin_state == SigninState::No;
@@ -397,7 +410,7 @@ pub fn start_or_queue_next(app: &AppHandle) {
     let next = take_next(&state);
     emit_queue_changed(app);
     if let Some(task) = next {
-        crate::notify(app, &format!("開始執行:{}…", prompt_preview(&task.prompt)));
+        crate::notify(app, &crate::i18n::task_starting(&prompt_preview(&task.prompt)));
         if let Err(e) = do_launch(app, task) {
             crate::notify(app, &e);
         }
@@ -434,7 +447,7 @@ pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
             let next = pop_and_reserve_next(&mut state.queue.lock().unwrap());
             emit_queue_changed(app);
             if let Some(next_task) = next {
-                crate::notify(app, &format!("開始執行:{}…", prompt_preview(&next_task.prompt)));
+                crate::notify(app, &crate::i18n::task_starting(&prompt_preview(&next_task.prompt)));
                 if let Err(chain_err) = do_launch(app, next_task) {
                     crate::notify(app, &chain_err);
                 }
@@ -449,9 +462,15 @@ pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
 fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(), String> {
     let s = state.settings.lock().unwrap().clone();
     let cat = state.catalog_cache.lock().unwrap().clone();
-    let (model, notice) = catalog::choose_model(&s.model, &cat);
+    let (model, notice) = resolve_usable_model(&s, &cat);
     if let Some(n) = notice {
         crate::notify(app, &n);
+    }
+    // 自動切換非 claude 模型時把新模型寫回設定(讓 chip/✓/下次啟動一致)
+    if model != s.model && model != catalog::CLAUDE_MODEL {
+        let mut st = state.settings.lock().unwrap();
+        st.model = model.clone();
+        let _ = settings::save(&settings::settings_path(), &st);
     }
     let spec = launcher::build_launch_spec(&task.prompt, &s, &model);
     let is_background = spec.background;
@@ -462,7 +481,7 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
     }
     let dir = logging::logs_dir();
     logging::rotate(&dir, 30);
-    let log = logging::new_run_log(&dir).map_err(|e| format!("無法建立記錄檔:{e}"))?;
+    let log = logging::new_run_log(&dir).map_err(|e| crate::i18n::log_create_failed(&e.to_string()))?;
     let app2 = app.clone();
     // 兩種模式 waiter 都會呼叫(spawn v1.1 契約):先處理通知,再接續佇列。
     let on_done: launcher::OnDone = Box::new(move |code, log_path, elapsed| {
@@ -473,7 +492,7 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
         // 持鎖橫跨 spawn → 補 pid:waiter(handle_task_exit/start_or_queue_next)
         // 第一步就鎖 queue,因此「極速結束」也不會在 pid 寫入前清掉預約。
         let mut q = state.queue.lock().unwrap();
-        let pid = launcher::spawn(&spec, log, Some(on_done)).map_err(|e| format!("啟動失敗:{e}"))?;
+        let pid = launcher::spawn(&spec, log, Some(on_done)).map_err(|e| crate::i18n::launch_failed(&e.to_string()))?;
         if let Some(rt) = q.running.as_mut().filter(|rt| rt.id == task.id) {
             rt.pid = Some(pid);
             rt.background = is_background;
@@ -505,12 +524,24 @@ fn handle_task_exit(
     // M3:taskkill 的退出碼會被分類成「任務失敗」— 使用者主動停止不是失敗。
     // 佇列接續由呼叫端(start_or_queue_next)照常進行。
     if task_was_stopping(&app.state::<AppState>()) {
-        crate::notify(app, "已停止任務");
+        crate::notify(app, &crate::i18n::task_stopped());
         return;
     }
     if code == 0 {
+        // 被動學習:exit 0 代表模型免費可用 —— 但只在「背景模式」採信。
+        // 前景是 `ollama launch` 包裝 claude 的退出碼,使用者關掉主控台或包裝器
+        // 遮蔽子程序錯誤都可能回 0(誤判);背景 -p 模式下模型 403/失敗時 claude
+        // 會以非零結束,所以 exit 0 才是可靠訊號。claude(Anthropic 帳號)不適用。
+        if is_background && model != catalog::CLAUDE_MODEL {
+            let state = app.state::<AppState>();
+            let mut st = state.settings.lock().unwrap();
+            if !st.known_free_models.iter().any(|m| m == model) {
+                st.known_free_models.push(model.to_string());
+                let _ = settings::save(&settings::settings_path(), &st);
+            }
+        }
         if is_background {
-            crate::notify(app, "任務完成");
+            crate::notify(app, &crate::i18n::task_done());
         }
         return;
     }
@@ -521,8 +552,7 @@ fn handle_task_exit(
     let tail = read_log_tail(log_path);
     if !is_background && tail.is_empty() {
         // 前景 fast-fail 且無記錄輸出 — 可能是訂閱/額度/登入問題
-        let msg = format!("啟動後立即失敗 (exit {code}),可能是模型需訂閱、額度用盡或登入失效");
-        crate::notify(app, &msg);
+        crate::notify(app, &crate::i18n::fast_fail(code));
         return;
     }
     match launcher::classify_failure(&tail) {
@@ -536,10 +566,10 @@ fn handle_task_exit(
                     let _ = settings::save(&settings::settings_path(), &st);
                 }
             }
-            crate::notify(app, "此模型需要付費訂閱 — 請到設定改用免費模型(如 minimax-m2.5:cloud)");
+            crate::notify(app, &crate::i18n::subscription_required());
         }
         launcher::FailureKind::Quota => {
-            crate::notify(app, "免費額度已用完,稍後重置(限制綁帳號,換模型無效)");
+            crate::notify(app, &crate::i18n::quota_exhausted());
         }
         launcher::FailureKind::Auth => {
             // Re-lock sign-in state so next submit_prompt triggers the wizard
@@ -549,13 +579,14 @@ fn handle_task_exit(
                 st.signin_state = SigninState::No;
                 let _ = settings::save(&settings::settings_path(), &st);
             }
-            crate::notify(app, "需要重新登入 ollama.com,下次啟動會自動引導");
+            crate::notify(app, &crate::i18n::need_relogin());
         }
         launcher::FailureKind::Other => {
+            let log_str = log_path.display().to_string();
             let msg = if code == -1 {
-                format!("任務異常結束(原因未知),記錄:{}", log_path.display())
+                crate::i18n::task_crashed(&log_str)
             } else {
-                format!("任務失敗 (exit {code}),記錄:{}", log_path.display())
+                crate::i18n::task_failed(code, &log_str)
             };
             crate::notify(app, &msg);
         }
@@ -611,7 +642,11 @@ pub async fn wizard_plan(state: State<'_, AppState>) -> Result<WizardPlan, Strin
 
 #[tauri::command]
 pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<bootstrap::StepResult, String> {
-    let model = state.settings.lock().unwrap().model.clone();
+    let model = {
+        let s = state.settings.lock().unwrap();
+        crate::i18n::set_locale(&s.locale);
+        s.model.clone()
+    };
     let step2 = step.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let runner = SystemRunner;
@@ -623,14 +658,14 @@ pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<boot
             // (200ms × 50 = wait up to 10s, same as prod_deps).
             "signin" | "model" => {
                 if !doctor::ensure_server(&runner, &http, 200, 50, &SERVE_SPAWN_GATE) {
-                    bootstrap::StepResult { ok: false, detail: "Ollama 服務尚未就緒,請重試".into() }
+                    bootstrap::StepResult { ok: false, detail: crate::i18n::ollama_not_ready() }
                 } else if step2 == "signin" {
                     bootstrap::signin(&runner)
                 } else {
                     bootstrap::register_model(&runner, &model)
                 }
             }
-            other => bootstrap::StepResult { ok: false, detail: format!("未知步驟 {other}") },
+            other => bootstrap::StepResult { ok: false, detail: crate::i18n::unknown_step(other) },
         }
     })
     .await
@@ -705,7 +740,7 @@ fn cancel_in_queue(state: &AppState, id: u64) -> bool {
 #[tauri::command]
 pub fn queue_cancel(state: State<AppState>, app: AppHandle, id: u64) -> Result<(), String> {
     if !cancel_in_queue(&state, id) {
-        return Err("佇列中找不到該任務".into());
+        return Err(crate::i18n::task_not_in_queue());
     }
     emit_queue_changed(&app);
     Ok(())
@@ -716,15 +751,15 @@ pub fn queue_cancel(state: State<AppState>, app: AppHandle, id: u64) -> Result<(
 /// (id, pid) 供鎖外 taskkill。讀 pid 與標記之間沒有空窗,不會殺錯任務。
 fn mark_stopping(q: &mut QueueState, expected_id: Option<u64>) -> Result<(u64, u32), String> {
     let Some(rt) = q.running.as_mut() else {
-        return Err("目前沒有執行中的任務".into());
+        return Err(crate::i18n::no_running_task());
     };
     if expected_id.is_some_and(|id| id != rt.id) {
-        return Err("任務已結束".into());
+        return Err(crate::i18n::task_already_ended());
     }
     if !rt.background {
-        return Err("前景任務請直接關閉其終端機視窗".into());
+        return Err(crate::i18n::foreground_close_terminal());
     }
-    let pid = rt.pid.ok_or_else(|| "無法取得任務的處理程序 ID".to_string())?;
+    let pid = rt.pid.ok_or_else(crate::i18n::no_task_pid)?;
     rt.stopping = true;
     Ok((rt.id, pid))
 }
@@ -755,25 +790,86 @@ pub struct ModelEntry {
     pub tier: String,
 }
 
-/// "anthropic":claude 哨符(用 Anthropic 帳號);"free":實證免費名單;
-/// "subscription":執行時學到要訂閱;其餘 "unknown"。
-fn compute_tier(name: &str, known_subscription: &[String]) -> &'static str {
+/// tier 來自五個來源,依此優先序判定:
+/// "anthropic":claude 哨符(用 Anthropic 帳號,永不探測);
+/// "broken":掃描學到「無法使用」(優先於 free,避免 learned-broken 被遮蓋);
+/// "subscription":實證訂閱名單或執行時/掃描學到要訂閱;
+/// "free":實證免費名單或被動學習/掃描學到免費;其餘 "unknown"。
+fn compute_tier(
+    name: &str,
+    known_subscription: &[String],
+    known_free: &[String],
+    known_broken: &[String],
+) -> &'static str {
     if name == catalog::CLAUDE_MODEL {
         "anthropic"
-    } else if catalog::VERIFIED_FREE.contains(&name) {
-        "free"
-    } else if known_subscription.iter().any(|m| m == name) {
+    } else if catalog::VERIFIED_INCOMPATIBLE.contains(&name) {
+        // 免費可連但跑不動 Claude Code — 最高優先,避免被誤標成 free
+        "incompatible"
+    } else if known_broken.iter().any(|m| m == name) {
+        "broken"
+    } else if catalog::VERIFIED_SUBSCRIPTION.contains(&name) || known_subscription.iter().any(|m| m == name) {
         "subscription"
+    } else if catalog::VERIFIED_FREE.contains(&name) || known_free.iter().any(|m| m == name) {
+        "free"
     } else {
         "unknown"
     }
 }
 
+/// 解析「實際要用的模型」:先處理目錄 fallback(choose_model),再做 tier 檢查 —
+/// 若選中的模型不可用(incompatible/subscription/broken),自動改用目錄中第一個
+/// 免費模型(優先 FALLBACKS 順序)。回傳 (model, 若有自動切換的通知)。
+/// claude(Anthropic 帳號)永遠原樣。
+fn resolve_usable_model(s: &Settings, catalog: &[String]) -> (String, Option<String>) {
+    if s.model == catalog::CLAUDE_MODEL {
+        return (catalog::CLAUDE_MODEL.to_string(), None);
+    }
+    let (model, notice) = catalog::choose_model(&s.model, catalog);
+    let tier = compute_tier(
+        &model,
+        &s.known_subscription_models,
+        &s.known_free_models,
+        &s.known_broken_models,
+    );
+    if matches!(tier, "incompatible" | "subscription" | "broken") {
+        let pick = catalog::FALLBACKS
+            .iter()
+            .find(|f| catalog.iter().any(|c| c == *f))
+            .map(|f| f.to_string())
+            .or_else(|| {
+                catalog
+                    .iter()
+                    .find(|m| {
+                        compute_tier(
+                            m,
+                            &s.known_subscription_models,
+                            &s.known_free_models,
+                            &s.known_broken_models,
+                        ) == "free"
+                    })
+                    .cloned()
+            });
+        if let Some(p) = pick {
+            if p != model {
+                let n = crate::i18n::model_auto_switched(&model, &p, tier);
+                return (p, Some(n));
+            }
+        }
+    }
+    (model, notice)
+}
+
 #[tauri::command]
 pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
-    let (current, known) = {
+    let (current, known_sub, known_free, known_broken) = {
         let s = state.settings.lock().unwrap();
-        (s.model.clone(), s.known_subscription_models.clone())
+        (
+            s.model.clone(),
+            s.known_subscription_models.clone(),
+            s.known_free_models.clone(),
+            s.known_broken_models.clone(),
+        )
     };
     let cat = state.catalog_cache.lock().unwrap().clone();
     // 離線/尚未抓到目錄時至少回傳目前設定的模型
@@ -788,7 +884,7 @@ pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
             .into_iter()
             .filter(|n| n != catalog::CLAUDE_MODEL)
             .map(|name| {
-                let tier = compute_tier(&name, &known).to_string();
+                let tier = compute_tier(&name, &known_sub, &known_free, &known_broken).to_string();
                 ModelEntry { name, tier }
             }),
     );
@@ -799,11 +895,171 @@ pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
 pub async fn set_model(_app: AppHandle, state: State<'_, AppState>, name: String) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
-        return Err("模型名稱不可為空".into());
+        return Err(crate::i18n::empty_model_name());
     }
     let mut s = state.settings.lock().unwrap();
     s.model = name;
     settings::save(&settings::settings_path(), &s).map_err(|e| e.to_string())
+}
+
+// ---------- v1.1: on-demand availability scan ----------
+
+pub const OLLAMA_CHAT_URL: &str = "http://127.0.0.1:11434/api/chat";
+
+#[derive(serde::Serialize)]
+pub struct ScanSummary {
+    pub free: usize,
+    pub subscription: usize,
+    pub broken: usize,
+    pub scanned: usize,
+    pub skipped: usize,
+}
+
+/// 把 /api/chat 探測結果映射成 tier:200=免費、403=需訂閱、其餘 HTTP 狀態=無法使用。
+/// 連線錯誤(transport Err)回 None —— 代表「測不到」(多半是 Ollama 沒開),
+/// 不可寫入 known_broken(否則暫時斷線會永久汙染快取),維持 unknown 待重掃。
+fn classify_probe(result: Result<u16, String>) -> Option<&'static str> {
+    match result {
+        Ok(200) => Some("free"),
+        Ok(403) => Some("subscription"),
+        Ok(_) => Some("broken"),
+        Err(_) => None,
+    }
+}
+
+/// /api/chat 探測用的最小請求 body(num_predict:1 只要 1 個 token,省額度)。
+/// 用 serde_json 組,安全跳脫模型名稱。
+fn probe_body(model: &str) -> String {
+    serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "hi" }],
+        "stream": false,
+        "options": { "num_predict": 1 }
+    })
+    .to_string()
+}
+
+/// dedupe push:不存在才加入。
+fn push_unique(list: &mut Vec<String>, model: &str) {
+    if !list.iter().any(|m| m == model) {
+        list.push(model.to_string());
+    }
+}
+
+/// 把模型從某個名單移除(重分類時用)。
+fn remove_from(list: &mut Vec<String>, model: &str) {
+    list.retain(|m| m != model);
+}
+
+/// 主動掃描:對目錄中 tier 仍為 "unknown" 的模型逐一探測 /api/chat,
+/// 依 200/403/其餘 分類成 free/subscription/broken 寫回設定。
+/// 探測在 spawn_blocking 內進行(不可橫跨 await 持有 State),先把需要的資料
+/// clone 出來,探完再鎖 settings 合併+存檔一次。進度經由 cloned AppHandle
+/// emit "scan-progress",結束 emit "scan-done"。
+#[tauri::command]
+pub async fn scan_models(app: AppHandle, state: State<'_, AppState>) -> Result<ScanSummary, String> {
+    // (1) 快照目錄 + 目前的 known_* 名單(鎖外探測前先 clone)
+    let catalog_models = state.catalog_cache.lock().unwrap().clone();
+    let (known_sub, known_free, known_broken) = {
+        let s = state.settings.lock().unwrap();
+        (
+            s.known_subscription_models.clone(),
+            s.known_free_models.clone(),
+            s.known_broken_models.clone(),
+        )
+    };
+    // (2) 目標 = 目錄中 tier 仍為 "unknown" 的模型(跳過 claude / 已分類者)
+    let total = catalog_models.len();
+    let targets: Vec<String> = catalog_models
+        .into_iter()
+        .filter(|n| n != catalog::CLAUDE_MODEL)
+        .filter(|n| compute_tier(n, &known_sub, &known_free, &known_broken) == "unknown")
+        .collect();
+    let skipped = total - targets.len();
+    let target_total = targets.len();
+
+    // (3) 在 spawn_blocking 內逐一 pull + probe + 分類 + emit 進度
+    let app2 = app.clone();
+    let results: Vec<(String, &'static str)> = tauri::async_runtime::spawn_blocking(move || {
+        use crate::command::Runner as _;
+        use crate::http::Http as _;
+        let runner = SystemRunner;
+        let http = UreqHttp;
+        let mut out: Vec<(String, &'static str)> = Vec::with_capacity(target_total);
+        for (i, model) in targets.into_iter().enumerate() {
+            // pull 先註冊雲端 stub(忽略結果);60s 上限
+            let _ = runner.run("ollama", &["pull", &model], std::time::Duration::from_secs(60));
+            let status = http.post_status(OLLAMA_CHAT_URL, &probe_body(&model), std::time::Duration::from_secs(60));
+            let is_transport_err = status.is_err();
+            let tier = classify_probe(status);
+            // 第一個就連不上 → Ollama 多半沒開,直接中止(不寫入任何 broken)
+            if is_transport_err && out.is_empty() {
+                return Err(crate::i18n::ollama_not_responding_for_scan());
+            }
+            // 連線錯誤(None)= 測不到,跳過不寫入;只有確定的 HTTP 結果才記錄
+            if let Some(tier) = tier {
+                out.push((model.clone(), tier));
+            }
+            if let Some(w) = app2.get_webview_window("palette") {
+                let _ = w.emit(
+                    "scan-progress",
+                    serde_json::json!({
+                        "done": i + 1,
+                        "total": target_total,
+                        "model": model,
+                        "result": tier.unwrap_or("error")
+                    }),
+                );
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // (4) 合併回設定(dedupe;重分類時從另外兩個名單移除),存檔一次
+    let mut summary = ScanSummary { free: 0, subscription: 0, broken: 0, scanned: results.len(), skipped };
+    {
+        let mut s = state.settings.lock().unwrap();
+        for (model, tier) in &results {
+            match *tier {
+                "free" => {
+                    remove_from(&mut s.known_subscription_models, model);
+                    remove_from(&mut s.known_broken_models, model);
+                    push_unique(&mut s.known_free_models, model);
+                    summary.free += 1;
+                }
+                "subscription" => {
+                    remove_from(&mut s.known_free_models, model);
+                    remove_from(&mut s.known_broken_models, model);
+                    push_unique(&mut s.known_subscription_models, model);
+                    summary.subscription += 1;
+                }
+                _ => {
+                    remove_from(&mut s.known_free_models, model);
+                    remove_from(&mut s.known_subscription_models, model);
+                    push_unique(&mut s.known_broken_models, model);
+                    summary.broken += 1;
+                }
+            }
+        }
+        settings::save(&settings::settings_path(), &s).map_err(|e| e.to_string())?;
+    }
+
+    // (5) 通知前端掃描完成(前端據此重抓 list_models_ui)
+    if let Some(w) = app.get_webview_window("palette") {
+        let _ = w.emit(
+            "scan-done",
+            serde_json::json!({
+                "free": summary.free,
+                "subscription": summary.subscription,
+                "broken": summary.broken,
+                "scanned": summary.scanned,
+                "skipped": summary.skipped
+            }),
+        );
+    }
+    Ok(summary)
 }
 
 /// webview 不得開任意網址 — 僅允許白名單(完全比對)。
@@ -815,7 +1071,7 @@ fn url_allowed(url: &str) -> bool {
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     if !url_allowed(&url) {
-        return Err("不允許開啟此網址".into());
+        return Err(crate::i18n::url_not_allowed());
     }
     use crate::command::Runner as _;
     SystemRunner.spawn_detached("explorer", &[&url]).map_err(|e| e.to_string())
@@ -887,10 +1143,10 @@ pub fn refresh_plan(app: AppHandle) {
 pub async fn start_voice_input(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let Some(w) = app.get_webview_window("palette") else {
-            return Err("找不到輸入面板視窗".to_string());
+            return Err(crate::i18n::palette_window_not_found());
         };
         let _ = w.show();
-        w.set_focus().map_err(|_| "無法聚焦輸入面板".to_string())?;
+        w.set_focus().map_err(|_| crate::i18n::palette_focus_failed())?;
         // 50ms 延遲讓焦點切換先完成,語音輸入才會落在面板的輸入框
         std::thread::sleep(std::time::Duration::from_millis(50));
         if let Err(e) = crate::voice::trigger_voice_typing() {
@@ -1072,6 +1328,9 @@ mod tests {
 
     #[test]
     fn mark_stopping_rules_and_sets_flag_in_same_acquisition() {
+        // 這些斷言比對的是經 i18n(預設繁中)產生的字串;固定語系避免與
+        // i18n 測試在同一 process 平行設定 en 時互相干擾。
+        crate::i18n::set_locale("zh-TW");
         let mut q = QueueState::default();
         assert!(mark_stopping(&mut q, None).is_err(), "沒有執行中任務不能停止");
         q.running = Some(running_task(1, false, Some(10)));
@@ -1087,6 +1346,7 @@ mod tests {
     /// M4:任務已換手(running.id != 預期 id)→ 不可殺到接續的新任務。
     #[test]
     fn mark_stopping_rejects_stale_task_id() {
+        crate::i18n::set_locale("zh-TW");
         let mut q = QueueState { running: Some(running_task(7, true, Some(111))), ..Default::default() };
         assert_eq!(mark_stopping(&mut q, Some(6)).unwrap_err(), "任務已結束");
         assert!(!q.running.as_ref().unwrap().stopping, "換手時不得標記新任務");
@@ -1111,6 +1371,8 @@ mod tests {
             history: vec!["真實歷史".into()],
             signin_state: SigninState::Yes,
             known_subscription_models: vec!["minimax-m2.7:cloud".into()],
+            known_free_models: vec!["gemma3:4b-cloud".into()],
+            known_broken_models: vec!["dead:cloud".into()],
             ..Default::default()
         };
         let incoming = Settings {
@@ -1120,10 +1382,15 @@ mod tests {
             background_mode: true,
             working_dir: r"C:\work".into(),
             autostart: false,
+            locale: "en".into(),
+            voice_hotkey: "Ctrl+Shift+M".into(),
+            system_prompt: "自訂個性".into(),
             // 前端的舊快照 — 必須被忽略
             history: vec!["stale".into()],
             signin_state: SigninState::No,
             known_subscription_models: vec!["stale:cloud".into()],
+            known_free_models: vec!["stale-free:cloud".into()],
+            known_broken_models: vec!["stale-broken:cloud".into()],
         };
         let merged = overlay_ui_fields(&current, &incoming);
         assert_eq!(merged.hotkey, "Ctrl+Alt+Space");
@@ -1132,12 +1399,25 @@ mod tests {
         assert!(merged.background_mode);
         assert_eq!(merged.working_dir, r"C:\work");
         assert!(!merged.autostart);
+        assert_eq!(merged.locale, "en", "locale 屬 UI 欄位,以 incoming 為準");
+        assert_eq!(merged.voice_hotkey, "Ctrl+Shift+M", "voice_hotkey 屬 UI 欄位,以 incoming 為準");
+        assert_eq!(merged.system_prompt, "自訂個性", "system_prompt 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.history, vec!["真實歷史".to_string()], "history 以記憶體為準");
         assert_eq!(merged.signin_state, SigninState::Yes, "signin_state 以記憶體為準");
         assert_eq!(
             merged.known_subscription_models,
             vec!["minimax-m2.7:cloud".to_string()],
             "tier learning 以記憶體為準"
+        );
+        assert_eq!(
+            merged.known_free_models,
+            vec!["gemma3:4b-cloud".to_string()],
+            "被動學習的免費名單以記憶體為準"
+        );
+        assert_eq!(
+            merged.known_broken_models,
+            vec!["dead:cloud".to_string()],
+            "掃描到的無法使用名單以記憶體為準"
         );
     }
 
@@ -1172,17 +1452,99 @@ mod tests {
     }
 
     #[test]
-    fn compute_tier_free_subscription_unknown() {
-        let known = vec!["minimax-m2.7:cloud".to_string()];
-        assert_eq!(compute_tier("minimax-m2.5:cloud", &known), "free");
-        assert_eq!(compute_tier("qwen3-coder-next:cloud", &known), "free");
-        assert_eq!(compute_tier("glm-4.7:cloud", &known), "free");
-        assert_eq!(compute_tier("minimax-m2.7:cloud", &known), "subscription");
-        assert_eq!(compute_tier("gpt-oss:120b-cloud", &known), "unknown");
-        assert_eq!(compute_tier("claude", &known), "anthropic");
-        // 同時在兩邊時以實證免費為準
-        let conflict = vec!["minimax-m2.5:cloud".to_string()];
-        assert_eq!(compute_tier("minimax-m2.5:cloud", &conflict), "free");
+    fn compute_tier_free_subscription_broken_unknown() {
+        let none: Vec<String> = vec![];
+        // 實證免費名單
+        assert_eq!(compute_tier("minimax-m2.5:cloud", &none, &none, &none), "free");
+        assert_eq!(compute_tier("qwen3-coder-next:cloud", &none, &none, &none), "free");
+        assert_eq!(compute_tier("glm-4.7:cloud", &none, &none, &none), "free");
+        assert_eq!(compute_tier("gemma4:31b-cloud", &none, &none, &none), "free");
+        assert_eq!(compute_tier("gpt-oss:120b-cloud", &none, &none, &none), "free");
+        // 實證訂閱名單(VERIFIED_SUBSCRIPTION)
+        assert_eq!(compute_tier("deepseek-v3.2:cloud", &none, &none, &none), "subscription");
+        assert_eq!(compute_tier("minimax-m2.7:cloud", &none, &none, &none), "subscription");
+        // 學到的訂閱模型
+        let known_sub = vec!["custom-sub:cloud".to_string()];
+        assert_eq!(compute_tier("custom-sub:cloud", &known_sub, &none, &none), "subscription");
+        // 被動學習/掃描學到的免費模型
+        let known_free = vec!["learned-free:cloud".to_string()];
+        assert_eq!(compute_tier("learned-free:cloud", &none, &known_free, &none), "free");
+        // 掃描學到的無法使用模型
+        let known_broken = vec!["dead:cloud".to_string()];
+        assert_eq!(compute_tier("dead:cloud", &none, &none, &known_broken), "broken");
+        // 完全未知
+        assert_eq!(compute_tier("nobody-knows:cloud", &none, &none, &none), "unknown");
+        // claude 哨符
+        assert_eq!(compute_tier("claude", &none, &none, &none), "anthropic");
+        // 不支援 Claude Code(免費可連但跑不動)
+        assert_eq!(compute_tier("rnj-1:8b-cloud", &none, &none, &none), "incompatible");
+        // 優先序:broken 蓋過 free(learned-broken 不被實證免費遮蓋)
+        let broken_qwen = vec!["qwen3-coder-next:cloud".to_string()];
+        assert_eq!(compute_tier("qwen3-coder-next:cloud", &none, &none, &broken_qwen), "broken");
+        // 優先序:subscription 蓋過 free
+        let sub_qwen = vec!["qwen3-coder-next:cloud".to_string()];
+        assert_eq!(compute_tier("qwen3-coder-next:cloud", &sub_qwen, &none, &none), "subscription");
+    }
+
+    #[test]
+    fn resolve_usable_model_switches_away_from_unusable() {
+        let cat: Vec<String> = vec![
+            "rnj-1:8b-cloud".into(),
+            "deepseek-v3.2:cloud".into(),
+            "minimax-m2.5:cloud".into(),
+            "qwen3-coder-next:cloud".into(),
+        ];
+        // 不支援 → 換成第一個免費(FALLBACKS[0] = minimax-m2.5,在目錄內)
+        let s = Settings { model: "rnj-1:8b-cloud".into(), ..Default::default() };
+        let (m, notice) = resolve_usable_model(&s, &cat);
+        assert_eq!(m, "minimax-m2.5:cloud");
+        assert!(notice.is_some());
+        // 需訂閱 → 同樣自動換走
+        let s = Settings { model: "deepseek-v3.2:cloud".into(), ..Default::default() };
+        let (m, _) = resolve_usable_model(&s, &cat);
+        assert_eq!(m, "minimax-m2.5:cloud");
+        // 本來就免費 → 不動、無通知
+        let s = Settings { model: "qwen3-coder-next:cloud".into(), ..Default::default() };
+        let (m, notice) = resolve_usable_model(&s, &cat);
+        assert_eq!(m, "qwen3-coder-next:cloud");
+        assert!(notice.is_none());
+        // claude → 永遠原樣
+        let s = Settings { model: "claude".into(), ..Default::default() };
+        let (m, notice) = resolve_usable_model(&s, &cat);
+        assert_eq!(m, "claude");
+        assert!(notice.is_none());
+    }
+
+    #[test]
+    fn classify_probe_maps_status_to_tier() {
+        assert_eq!(classify_probe(Ok(200)), Some("free"));
+        assert_eq!(classify_probe(Ok(403)), Some("subscription"));
+        assert_eq!(classify_probe(Ok(500)), Some("broken"));
+        assert_eq!(classify_probe(Ok(404)), Some("broken"));
+        // 連線錯誤不得分類成 broken(會永久汙染快取);回 None 維持 unknown 待重掃
+        assert_eq!(classify_probe(Err("connection refused".into())), None);
+    }
+
+    #[test]
+    fn probe_body_escapes_model_name_and_limits_tokens() {
+        let body = probe_body(r#"weird"name:cloud"#);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["model"], r#"weird"name:cloud"#);
+        assert_eq!(v["stream"], false);
+        assert_eq!(v["options"]["num_predict"], 1);
+        assert_eq!(v["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn push_unique_and_remove_from_dedupe_and_reclassify() {
+        let mut list = vec!["a:cloud".to_string()];
+        push_unique(&mut list, "a:cloud"); // already present → no dup
+        push_unique(&mut list, "b:cloud");
+        assert_eq!(list, vec!["a:cloud".to_string(), "b:cloud".to_string()]);
+        remove_from(&mut list, "a:cloud");
+        assert_eq!(list, vec!["b:cloud".to_string()]);
+        remove_from(&mut list, "missing:cloud"); // no-op
+        assert_eq!(list, vec!["b:cloud".to_string()]);
     }
 
     #[test]

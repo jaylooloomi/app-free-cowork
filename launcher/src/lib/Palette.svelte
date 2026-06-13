@@ -3,11 +3,14 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { api, type StatusDto, type QueueDto, type ModelEntry, type Settings } from "./api";
-  import { S } from "./strings";
+  import { strings } from "./strings";
 
   let input = $state("");
   let status = $state<StatusDto | null>(null);
   let settings = $state<Settings | null>(null);
+  // 介面語言以 settings.locale 為準;尚未取得設定前退回 zh-TW。
+  // S 為 $derived,locale 變動(下次開啟面板重新 refresh)時整個面板會以新語言重繪。
+  const S = $derived(strings(settings?.locale ?? "zh-TW"));
   let error = $state("");
   let busy = $state(false);
   let history: string[] = $state([]);
@@ -21,6 +24,11 @@
   let queue = $state<QueueDto | null>(null);
   let models = $state<ModelEntry[]>([]);
   let dropdownOpen = $state(false);
+  // 可用性掃描
+  let scanning = $state(false);
+  let scanProgress = $state<{ done: number; total: number } | null>(null);
+  // 預設只顯示可用模型(你的 Claude 帳號 + 免費);切換顯示全部
+  let showAll = $state(false);
   let listening = $state(false);
   let transient = $state("");
   let transientTimer: number | undefined;
@@ -85,6 +93,7 @@
       hIndex = -1;
       dropdownOpen = false;
       attachments = [];
+      scanProgress = null;
       stopListening();
       refresh();
       refreshQueue();
@@ -92,6 +101,22 @@
     });
     const unlistenQueue = listen("queue-changed", () => {
       refreshQueue();
+    });
+    // 掃描進度:後端對每個模型探測後 emit;結束時 scan-done 帶統計
+    const unlistenScanProgress = listen<{ done: number; total: number }>("scan-progress", (e) => {
+      scanProgress = { done: e.payload.done, total: e.payload.total };
+    });
+    const unlistenScanDone = listen<{
+      free: number;
+      subscription: number;
+      broken: number;
+      scanned: number;
+      skipped: number;
+    }>("scan-done", (e) => {
+      scanning = false;
+      scanProgress = null;
+      showTransient(S.modelScanDone(e.payload));
+      refreshModels();
     });
     // busy(任務送出中)時不自動隱藏 — 避免提交瞬間失焦把面板關掉
     const onBlur = () => {
@@ -115,6 +140,8 @@
     return () => {
       unlistenShown.then((f) => f());
       unlistenQueue.then((f) => f());
+      unlistenScanProgress.then((f) => f());
+      unlistenScanDone.then((f) => f());
       window.removeEventListener("blur", onBlur);
       ro.disconnect();
       clearTimeout(transientTimer);
@@ -185,9 +212,38 @@
     attachments = attachments.filter((_, idx) => idx !== i);
   }
 
-  // Escape 走全域(svelte:window)— 不管焦點在哪都能關閉選單/面板,並處理層級:
-  // 選單開啟時先關選單,再按一次才隱藏面板。
+  // 解析快捷鍵字串(如 "Alt+J"、"Ctrl+Shift+M")並與 keydown 事件比對。
+  // 修飾鍵需完全相符;主鍵比對 e.key(不分大小寫,space 特別處理)。
+  function matchesHotkey(e: KeyboardEvent, combo: string): boolean {
+    const parts = combo
+      .split("+")
+      .map((p) => p.trim().toLowerCase())
+      .filter(Boolean);
+    if (parts.length === 0) return false;
+    const key = parts[parts.length - 1];
+    const mods = parts.slice(0, -1);
+    const wantAlt = mods.includes("alt");
+    const wantCtrl = mods.includes("ctrl") || mods.includes("control");
+    const wantShift = mods.includes("shift");
+    const wantMeta =
+      mods.includes("meta") || mods.includes("win") || mods.includes("cmd") || mods.includes("super");
+    if (e.altKey !== wantAlt || e.ctrlKey !== wantCtrl || e.shiftKey !== wantShift || e.metaKey !== wantMeta) {
+      return false;
+    }
+    const ek = (e.key || "").toLowerCase();
+    if (key === "space") return ek === " ";
+    return ek === key;
+  }
+
+  // 全域鍵(svelte:window)— 不管焦點在哪都生效:
+  // 語音快捷鍵(預設 Alt+J,可在設定調整)啟動語音輸入;Alt+H 仍是開/關面板。
+  // Escape:選單開啟時先關選單,再按一次才隱藏面板。
   function onGlobalKey(e: KeyboardEvent) {
+    if (matchesHotkey(e, settings?.voice_hotkey || "Alt+J")) {
+      e.preventDefault();
+      if (!busy && !offline) onMic();
+      return;
+    }
     if (e.key !== "Escape") return;
     if (dropdownOpen) {
       dropdownOpen = false;
@@ -247,6 +303,19 @@
     }
   }
 
+  // A-Z 排序,但 claude(anthropic)永遠置頂 — localeCompare 會把 "claude"
+  // 按字串排到中間,因此先抽出 claude、其餘排序後再前插。
+  function sortModels(list: ModelEntry[]): ModelEntry[] {
+    const claude = list.filter((m) => m.name === "claude");
+    const rest = list.filter((m) => m.name !== "claude").sort((a, b) => a.name.localeCompare(b.name));
+    return [...claude, ...rest];
+  }
+
+  async function refreshModels() {
+    const list = await api.listModelsUi();
+    models = sortModels(list);
+  }
+
   async function toggleDropdown() {
     if (dropdownOpen) {
       dropdownOpen = false;
@@ -254,11 +323,25 @@
     }
     error = "";
     try {
-      const list = await api.listModelsUi();
-      models = list.sort((a, b) => a.name.localeCompare(b.name));
+      await refreshModels();
       dropdownOpen = true;
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  async function scan() {
+    if (scanning) return;
+    error = "";
+    scanning = true;
+    scanProgress = null;
+    try {
+      // 結束統計與列表刷新由 "scan-done" 事件處理;此處只兜底錯誤。
+      await api.scanModels();
+    } catch (e) {
+      error = String(e);
+      scanning = false;
+      scanProgress = null;
     }
   }
 
@@ -311,12 +394,25 @@
             : status.plan,
   );
 
-  const tierLabels: Record<ModelEntry["tier"], string> = {
+  const tierLabels: Record<ModelEntry["tier"], string> = $derived({
     free: S.tierFree,
     subscription: S.tierSubscription,
     unknown: S.tierUnknown,
     anthropic: S.tierAnthropic,
-  };
+    broken: S.tierBroken,
+    incompatible: S.tierIncompatible,
+  });
+
+  // ✓ 以設定檔的 model 為準(offline 時 status.model 可能不可靠),退回 status?.model
+  const currentModel = $derived(settings?.model || status?.model);
+
+  // 預設只顯示「可用」模型(你的 Claude 帳號 + 免費);顯示全部時不過濾。
+  // 目前選中的模型一律保留可見,即使被篩掉。
+  const visibleModels = $derived(
+    showAll
+      ? models
+      : models.filter((m) => m.tier === "anthropic" || m.tier === "free" || m.name === currentModel),
+  );
 
   // claude 哨符在選單顯示成易讀名稱
   function modelLabel(name: string): string {
@@ -325,10 +421,7 @@
 
   const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
 
-  const micTip = S.micTooltip();
-
-  // ✓ 以設定檔的 model 為準(offline 時 status.model 可能不可靠),退回 status?.model
-  const currentModel = $derived(settings?.model || status?.model);
+  const micTip = $derived(S.micTooltip(settings?.voice_hotkey || "Alt+J"));
 </script>
 
 <svelte:window onkeydown={onGlobalKey} />
@@ -423,7 +516,20 @@
 
   {#if dropdownOpen}
     <div class="dropdown" bind:this={dropdownEl}>
-      {#each models as m (m.name)}
+      <div class="dhead">
+        <button class="scan" onclick={scan} disabled={scanning} title={S.modelOnlyUsable}>
+          {#if scanning}
+            {scanProgress ? S.modelScanning(scanProgress.done, scanProgress.total) : S.modelScan}
+          {:else}
+            {S.modelScan}
+          {/if}
+        </button>
+        <label class="showall">
+          <input type="checkbox" bind:checked={showAll} />
+          {S.modelShowAll}
+        </label>
+      </div>
+      {#each visibleModels as m (m.name)}
         <button class="opt" onclick={() => pickModel(m.name)}>
           <span class="check">{m.name === currentModel ? "✓" : ""}</span>
           <span class="name">{modelLabel(m.name)}</span>
@@ -701,5 +807,52 @@
   .badge.anthropic {
     color: #c8a2ff;
     background: rgba(200, 162, 255, 0.15);
+  }
+  .badge.incompatible {
+    color: #b0b0b0;
+    background: rgba(176, 176, 176, 0.12);
+  }
+  .badge.broken {
+    color: #f7768e;
+    background: rgba(247, 118, 142, 0.12);
+  }
+  .dhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 6px 6px;
+    border-bottom: 1px solid var(--panel-border);
+    margin-bottom: 4px;
+  }
+  .scan {
+    border: 1px solid var(--panel-border);
+    background: var(--panel-bg);
+    color: #ccc;
+    font-size: 12px;
+    border-radius: 6px;
+    padding: 3px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .scan:hover:not(:disabled) {
+    border-color: #7aa2f7;
+    color: #eee;
+  }
+  .scan:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .showall {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #aaa;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .showall input {
+    cursor: pointer;
   }
 </style>

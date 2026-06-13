@@ -2,9 +2,11 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { api, type Settings } from "./api";
-  import { S } from "./strings";
+  import { strings } from "./strings";
 
-  let s: Settings | null = $state(null);
+  let s = $state<Settings | null>(null);
+  // 語言選擇器綁定 s.locale;S 為 $derived,改選語言後本視窗的標籤立即以新語言重繪。
+  const S = $derived(strings(s?.locale ?? "zh-TW"));
   let models: string[] = $state([]);
   let saved = $state(false);
   let error = $state("");
@@ -43,11 +45,14 @@
       const merged = {
         ...fresh,
         hotkey: snap.hotkey,
+        voice_hotkey: snap.voice_hotkey,
         model: snap.model,
         cautious_mode: snap.cautious_mode,
         background_mode: snap.background_mode,
         working_dir: snap.working_dir,
         autostart: snap.autostart,
+        locale: snap.locale,
+        system_prompt: snap.system_prompt,
       };
       // 失敗(例:快捷鍵註冊失敗)→ 後端已回滾,顯示訊息,欄位保持可編輯重試
       await api.saveSettings(merged);
@@ -72,9 +77,21 @@
   <main class="settings">
     <h1>{S.settingsTitle}</h1>
     <label
+      >{S.settingsLanguage}
+      <select bind:value={s.locale}>
+        <option value="zh-TW">繁體中文</option>
+        <option value="en">English</option>
+      </select></label
+    >
+    <label
       >{S.settingsHotkey}
       <input bind:value={s.hotkey} placeholder={S.settingsHotkeyPlaceholder} />
       <small>{S.settingsHotkeyHint}</small></label
+    >
+    <label
+      >{S.settingsVoiceHotkey}
+      <input bind:value={s.voice_hotkey} placeholder={S.settingsVoiceHotkeyPlaceholder} />
+      <small>{S.settingsVoiceHotkeyHint}</small></label
     >
     <label
       >{S.settingsModel}
@@ -89,6 +106,15 @@
       <input bind:value={s.working_dir} placeholder={S.settingsWorkingDirPlaceholder} /></label
     >
     <label class="row"><input type="checkbox" bind:checked={s.autostart} /> {S.settingsAutostart}</label>
+    <label
+      >{S.settingsSystemPrompt}
+      <textarea
+        bind:value={s.system_prompt}
+        rows="4"
+        placeholder={S.settingsSystemPromptPlaceholder}
+      ></textarea>
+      <small>{S.settingsSystemPromptHint}</small></label
+    >
     <div class="actions">
       <button class="primary" onclick={save}>{S.settingsSave}</button>
       <button onclick={openLogs}>{S.settingsOpenLogs}</button>
@@ -122,7 +148,8 @@
     gap: 8px;
   }
   input:not([type="checkbox"]),
-  select {
+  select,
+  textarea {
     padding: 8px;
     border-radius: 6px;
     border: 1px solid #444;
@@ -130,8 +157,14 @@
     color: #eee;
     outline: none;
   }
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+    resize: vertical;
+  }
   input:not([type="checkbox"]):focus,
-  select:focus {
+  select:focus,
+  textarea:focus {
     border-color: #7aa2f7;
   }
   small {

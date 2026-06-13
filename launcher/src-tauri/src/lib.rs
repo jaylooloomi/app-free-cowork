@@ -4,6 +4,7 @@ pub mod command;
 pub mod doctor;
 pub mod fx;
 pub mod http;
+pub mod i18n;
 pub mod ipc;
 pub mod launcher;
 pub mod logging;
@@ -159,6 +160,7 @@ pub fn run() {
             ipc::task_stop,
             ipc::list_models_ui,
             ipc::set_model,
+            ipc::scan_models,
             ipc::open_url,
             ipc::start_voice_input,
             ipc::effects_applied,

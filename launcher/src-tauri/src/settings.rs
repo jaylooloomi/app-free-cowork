@@ -19,6 +19,18 @@ pub struct Settings {
     /// 執行時學到「需要付費訂閱」的模型(403 requires a subscription)。
     /// 模型選單據此標示 tier;serde default 讓舊設定檔可無痛升級。
     pub known_subscription_models: Vec<String>,
+    /// 學到/掃描到「免費可用」的模型(200 OK)。被動學習與主動掃描都會寫入。
+    pub known_free_models: Vec<String>,
+    /// 掃描到「無法使用」的模型(非 403 的錯誤,如不存在/暫時故障)。
+    pub known_broken_models: Vec<String>,
+    /// 介面語言:"zh-TW"(預設)或 "en"。前端 UI 與後端通知/錯誤訊息都依此切換。
+    pub locale: String,
+    /// 面板開著時啟動語音輸入的快捷鍵(預設 "Alt+J")。這是面板內的鍵,不註冊為
+    /// 全域熱鍵;前端解析此字串(如 "Alt+J"、"Ctrl+Shift+M")比對 keydown。
+    pub voice_hotkey: String,
+    /// 自訂「助手個性」系統提示;留空 = 使用內建的「動手型助手」預設(依語言)。
+    /// 進階使用者可改寫,改變 AI 的行事風格。
+    pub system_prompt: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -32,6 +44,11 @@ impl Default for Settings {
             history: Vec::new(),
             signin_state: SigninState::Unknown,
             known_subscription_models: Vec::new(),
+            known_free_models: Vec::new(),
+            known_broken_models: Vec::new(),
+            locale: "zh-TW".into(),
+            voice_hotkey: "Alt+J".into(),
+            system_prompt: String::new(),
         }
     }
 }
@@ -93,7 +110,8 @@ mod tests {
     fn defaults_are_per_spec() {
         let s = Settings::default();
         assert_eq!(s.hotkey, "Alt+H");
-        assert_eq!(s.model, "qwen3-vl:235b-cloud");
+        assert_eq!(s.voice_hotkey, "Alt+J");
+        assert_eq!(s.model, "minimax-m2.5:cloud");
         assert!(!s.cautious_mode);
         assert!(!s.background_mode);
         assert_eq!(s.working_dir, "");
@@ -125,7 +143,7 @@ mod tests {
         std::fs::write(&p, r#"{"hotkey":"Ctrl+Alt+Space"}"#).unwrap();
         let partial = load(&p);
         assert_eq!(partial.hotkey, "Ctrl+Alt+Space");
-        assert_eq!(partial.model, "qwen3-vl:235b-cloud");
+        assert_eq!(partial.model, "minimax-m2.5:cloud");
         assert!(partial.known_subscription_models.is_empty(), "v1 settings without the field must default to empty");
     }
     #[test]

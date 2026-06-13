@@ -69,7 +69,7 @@ pub fn claude_check(deps: &Deps) -> Status {
     if claude_installed(&deps.claude_paths) {
         Status::Ready
     } else {
-        Status::Degraded { reason: "尚未安裝 Claude Code(請先完成首次安裝)".into() }
+        Status::Degraded { reason: crate::i18n::claude_not_installed() }
     }
 }
 
@@ -146,7 +146,7 @@ pub fn full_check(deps: &Deps, model: &str) -> Status {
     if !missing.is_empty() { return Status::NeedsSetup { missing }; }
 
     if !ensure_server(deps.runner, deps.http, deps.serve_poll_ms, deps.serve_attempts, deps.serve_spawn_gate) {
-        return Status::Degraded { reason: "Ollama 服務未回應，請重新啟動 Ollama 後再試".into() };
+        return Status::Degraded { reason: crate::i18n::ollama_service_down() };
     }
     if !model_registered(deps.runner, model) {
         return Status::NeedsSetup { missing: vec![Component::Model] };
@@ -184,7 +184,7 @@ pub fn quick_check(deps: &Deps) -> Status {
         return Status::NeedsSetup { missing: vec![] };
     }
     if !ensure_server(deps.runner, deps.http, deps.serve_poll_ms, deps.serve_attempts, deps.serve_spawn_gate) {
-        return Status::Degraded { reason: "Ollama 服務未回應，請重新啟動 Ollama 後再試".into() };
+        return Status::Degraded { reason: crate::i18n::ollama_service_down() };
     }
     Status::Ready
 }
