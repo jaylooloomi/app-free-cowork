@@ -30,6 +30,7 @@
   // 預設只顯示可用模型(你的 Claude 帳號 + 免費);切換顯示全部
   let showAll = $state(false);
   let listening = $state(false);
+  let capturing = $state(false); // 框選截圖進行中(避免重複觸發、暫停自動隱藏)
   let transient = $state("");
   let transientTimer: number | undefined;
   let listenTimer: number | undefined;
@@ -174,9 +175,9 @@
         if (!taskRunning) dismissOutput();
       }, 5000);
     });
-    // busy(任務送出中)時不自動隱藏 — 避免提交瞬間失焦把面板關掉
+    // busy(任務送出中)/ capturing(截圖中,後端會自行隱藏再顯示)時不自動隱藏
     const onBlur = () => {
-      if (!busy) api.hidePalette().catch(() => {});
+      if (!busy && !capturing) api.hidePalette().catch(() => {});
     };
     window.addEventListener("blur", onBlur);
     // 視窗高度貼齊內容(佇列、模型選單、串流結果):下限 110、上限 600。
@@ -398,6 +399,23 @@
     listenTimer = window.setTimeout(() => (listening = false), 10000);
   }
 
+  // 截圖鈕:後端先隱藏面板 → 觸發 Windows 框選 → 取回剪貼簿影像 → 回傳暫存路徑;
+  // 取回後面板已被後端重新顯示,這裡把圖片加進附件(同貼上圖片的流程)。
+  async function onCapture() {
+    if (capturing) return;
+    error = "";
+    capturing = true;
+    try {
+      const path = await api.captureScreenshot();
+      if (path) attachments = [...attachments, path];
+    } catch (e) {
+      error = String(e);
+    } finally {
+      capturing = false;
+      el?.focus();
+    }
+  }
+
   async function stopTask() {
     error = "";
     try {
@@ -588,6 +606,29 @@
       disabled={busy || offline}
     />
     <button
+      class="cap"
+      onclick={onCapture}
+      onmousedown={(e) => e.preventDefault()}
+      disabled={busy || offline || capturing}
+      title={S.captureTooltip}
+      aria-label={S.captureTooltip}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        width="18"
+        height="18"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M6 3v13a2 2 0 0 0 2 2h13" />
+        <path d="M18 21V8a2 2 0 0 0-2-2H3" />
+      </svg>
+    </button>
+    <button
       class="mic"
       class:listening
       onclick={onMic}
@@ -707,7 +748,7 @@
 
   <div class="bar">
     <div class="status" class:error={!!error}>
-      {error || transient || (listening ? S.voiceHint : statusText)}
+      {error || transient || (capturing ? S.capturingHint : listening ? S.voiceHint : statusText)}
     </div>
     <div class="chips" bind:this={chipsEl}>
       {#if planLabel}
@@ -894,7 +935,8 @@
     color: #eee;
     outline: none;
   }
-  .mic {
+  .mic,
+  .cap {
     position: relative;
     display: flex;
     align-items: center;
@@ -909,11 +951,13 @@
     cursor: pointer;
     padding: 0;
   }
-  .mic:hover:not(:disabled) {
+  .mic:hover:not(:disabled),
+  .cap:hover:not(:disabled) {
     color: #eee;
     background: rgba(255, 255, 255, 0.08);
   }
-  .mic:disabled {
+  .mic:disabled,
+  .cap:disabled {
     opacity: 0.4;
     cursor: default;
   }

@@ -65,6 +65,8 @@ const zhTW = {
   planMax: "Max",
   planTooltip: "查看用量與重置時間",
   micTooltip: (hk: string) => `語音輸入(說話轉文字;快捷鍵 ${hk})`,
+  captureTooltip: "截圖(框選後自動貼入)",
+  capturingHint: "截圖中…框選你要的範圍",
   voiceHint: "語音輸入已啟動,請開始說話",
   // ---------- 串流結果回顯 ----------
   outputRunning: "執行中…",
@@ -147,6 +149,8 @@ const en = {
   planMax: "Max",
   planTooltip: "View usage and reset time",
   micTooltip: (hk: string) => `Voice input (speech to text; shortcut ${hk})`,
+  captureTooltip: "Screenshot (snip a region; auto-attached)",
+  capturingHint: "Capturing… select the region you want",
   voiceHint: "Voice input is active — start speaking",
   // ---------- streaming output ----------
   outputRunning: "Running…",

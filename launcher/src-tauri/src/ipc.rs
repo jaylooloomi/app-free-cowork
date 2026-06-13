@@ -301,6 +301,88 @@ pub fn save_pasted_image(data: Vec<u8>, ext: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// 觸發 Windows 框選截圖(ms-screenclip:),等使用者框選完成後從剪貼簿取回影像,
+/// 存成暫存 PNG 回傳路徑(供當附件)。取消 / 逾時(無新影像)→ 回傳 None。
+/// 截圖期間先隱藏面板讓出畫面,結束後直接 show 回來(不發 palette-shown,保留前端附件狀態)。
+#[tauri::command]
+pub async fn capture_screenshot(app: AppHandle) -> Result<Option<String>, String> {
+    use std::time::Duration;
+    // 截圖前剪貼簿影像的指紋,避免把舊圖誤判成新截圖
+    let baseline = clipboard_image_fingerprint();
+    hide_window(&app, "palette");
+    let png = tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(150)); // 確保面板已隱藏再開遮罩
+        trigger_screen_snip();
+        poll_new_clipboard_png(baseline, Duration::from_secs(60))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    // 不論成敗都把面板叫回(直接 show,不發 palette-shown → 保留附件狀態)
+    if let Some(w) = app.get_webview_window("palette") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    match png {
+        Some(bytes) => Ok(Some(write_temp_image(&bytes).map_err(|e| e.to_string())?)),
+        None => Ok(None),
+    }
+}
+
+/// explorer 可靠地開啟 URI 協定;ms-screenclip: 直接叫出 Windows 框選截圖遮罩。
+fn trigger_screen_snip() {
+    let _ = std::process::Command::new("explorer").arg("ms-screenclip:").spawn();
+}
+
+fn fnv1a(data: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// 目前剪貼簿影像的指紋(寬、高、內容雜湊);無影像則 None。
+fn clipboard_image_fingerprint() -> Option<(usize, usize, u64)> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    let img = cb.get_image().ok()?;
+    Some((img.width, img.height, fnv1a(&img.bytes)))
+}
+
+/// 輪詢剪貼簿,直到出現與 baseline 不同的影像(= 使用者框選完成)→ 轉 PNG bytes;逾時 → None。
+fn poll_new_clipboard_png(baseline: Option<(usize, usize, u64)>, timeout: std::time::Duration) -> Option<Vec<u8>> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let Ok(mut cb) = arboard::Clipboard::new() else { continue };
+        let Ok(img) = cb.get_image() else { continue };
+        let fp = (img.width, img.height, fnv1a(&img.bytes));
+        if Some(fp) != baseline {
+            return rgba_to_png(img.width as u32, img.height as u32, &img.bytes);
+        }
+    }
+    None
+}
+
+fn rgba_to_png(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let buf = image::RgbaImage::from_raw(w, h, rgba.to_vec())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(buf)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .ok()?;
+    Some(out.into_inner())
+}
+
+fn write_temp_image(bytes: &[u8]) -> std::io::Result<String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let dir = std::env::temp_dir().join("free-claude-code-paste");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("snip-{stamp}.png"));
+    std::fs::write(&path, bytes)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// 回傳 "launched" | "queued" | "wizard";Err(中文訊息) 顯示在面板。
 #[tauri::command]
 pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: String) -> Result<String, String> {

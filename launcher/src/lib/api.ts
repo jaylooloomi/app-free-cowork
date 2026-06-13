@@ -87,6 +87,8 @@ export const api = {
   queueCancel: (id: number) => invoke<void>("queue_cancel", { id }),
   /** 打勾移除一筆已完成項目 */
   dismissCompleted: (id: number) => invoke<void>("dismiss_completed", { id }),
+  /** 框選截圖:觸發 Windows 框選,回傳暫存 PNG 路徑;取消/逾時回 null */
+  captureScreenshot: () => invoke<string | null>("capture_screenshot"),
   /** 僅背景任務可停止;前景/閒置時 reject(中文訊息)。 */
   taskStop: () => invoke<void>("task_stop"),
   listModelsUi: () => invoke<ModelEntry[]>("list_models_ui"),
