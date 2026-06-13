@@ -172,14 +172,14 @@
       if (!busy) api.hidePalette().catch(() => {});
     };
     window.addEventListener("blur", onBlur);
-    // 視窗高度貼齊內容(佇列、模型選單、串流結果):下限 110、上限 520。
+    // 視窗高度貼齊內容(佇列、模型選單、串流結果):下限 110、上限 600。
     // ResizeObserver 在 observe() 時會立刻送出初始觀測,首次顯示前就會收斂到內容高度。
     // 後端只設定位置、不設定大小,不會互相干擾。
     const win = getCurrentWindow();
     let lastH = 0;
     const ro = new ResizeObserver(() => {
       if (!rootEl) return;
-      const h = Math.min(520, Math.max(110, Math.ceil(rootEl.offsetHeight)));
+      const h = Math.min(600, Math.max(110, Math.ceil(rootEl.offsetHeight)));
       if (h !== lastH) {
         lastH = h;
         win.setSize(new LogicalSize(640, h)).catch(() => {});
@@ -540,10 +540,6 @@
     return name === "claude" ? "Claude(Anthropic 官方)" : name;
   }
 
-  const hasQueue = $derived(
-    !!queue && (queue.running !== null || queue.queued.length > 0 || queue.completed.length > 0),
-  );
-
   const micTip = $derived(S.micTooltip(settings?.voice_hotkey || "Alt+J"));
 
   // 串流中顯示累積文字;收到 result 行後改顯示其最終文字(兩者內容一致,避免重複)。
@@ -609,58 +605,68 @@
     </button>
   </div>
 
-  <!-- 選單開啟時暫時隱藏佇列,避免合計高度頂到 420 上限被裁切 -->
-  {#if hasQueue && queue && !dropdownOpen}
-    <div class="queue">
-      {#if queue.running}
-        <div class="qrow running">
-          <span class="qtext">▶ {truncate(queue.running.prompt)}</span>
-          <span class="qstate">{S.queueRunning}</span>
-          {#if queue.running.background}
-            <button class="link" onclick={stopTask}>{S.queueStop}</button>
-          {/if}
-        </div>
-      {/if}
-      {#each queue.queued as t, i (t.id)}
-        <div class="qrow">
-          <span class="qtext">{i + 1}. {truncate(t.prompt)}</span>
-          <span class="qstate">{S.queueQueued}</span>
-          <button class="x" onclick={() => cancelTask(t.id)} title={S.queueCancelTip} aria-label={S.queueCancelTip}>
-            ✕
-          </button>
-        </div>
-      {/each}
-      {#each queue.completed as c (c.id)}
-        <div class="qrow done" class:checked={checking.includes(c.id)} class:failed={!c.ok}>
-          <button
-            class="check"
-            onclick={() => onCheckCompleted(c.id)}
-            title={S.completedDismissTip}
-            aria-label={S.completedDismissTip}
-          >
-            {#if checking.includes(c.id)}✓{:else}{c.ok ? "○" : "✗"}{/if}
-          </button>
-          {#if outputHistory[c.id]}
-            <button class="qtext detail-toggle" onclick={() => toggleDetail(c.id)} title={S.completedDetailTip}>
-              <span class="caret">{expandedId === c.id ? "▾" : "▸"}</span>{truncate(c.prompt)}
-            </button>
-          {:else}
-            <span class="qtext">{truncate(c.prompt)}</span>
-          {/if}
-          {#if !c.ok}<span class="qstate fail">{S.completedFailed}</span>{/if}
-        </div>
-        {#if expandedId === c.id && outputHistory[c.id]}
-          <div class="qdetail">
-            {#if outputHistory[c.id].tools.length}
-              <div class="otools">
-                {#each outputHistory[c.id].tools as t, i (i)}<span class="otool">🔧 {t}</span>{/each}
-              </div>
+  <!-- 選單開啟時暫時隱藏佇列,避免合計高度頂到上限被裁切 -->
+  <!-- 「排隊/執行中」與「已完成」拆成兩個獨立區域:已完成區不自己捲動(隨內容長高),
+       展開的細節因此只有自己那一條捲軸,不再與外層巢狀(避免兩條捲軸疊一起)。 -->
+  {#if queue && !dropdownOpen}
+    {#if queue.running || queue.queued.length > 0}
+      <div class="queue active">
+        <div class="qsection">{S.sectionActive}</div>
+        {#if queue.running}
+          <div class="qrow running">
+            <span class="qtext">▶ {truncate(queue.running.prompt)}</span>
+            <span class="qstate">{S.queueRunning}</span>
+            {#if queue.running.background}
+              <button class="link" onclick={stopTask}>{S.queueStop}</button>
             {/if}
-            {#if outputHistory[c.id].text}<div class="qdetail-text">{outputHistory[c.id].text}</div>{/if}
           </div>
         {/if}
-      {/each}
-    </div>
+        {#each queue.queued as t, i (t.id)}
+          <div class="qrow">
+            <span class="qtext">{i + 1}. {truncate(t.prompt)}</span>
+            <span class="qstate">{S.queueQueued}</span>
+            <button class="x" onclick={() => cancelTask(t.id)} title={S.queueCancelTip} aria-label={S.queueCancelTip}>
+              ✕
+            </button>
+          </div>
+        {/each}
+      </div>
+    {/if}
+    {#if queue.completed.length > 0}
+      <div class="queue completed">
+        <div class="qsection">{S.sectionCompleted}</div>
+        {#each queue.completed as c (c.id)}
+          <div class="qrow done" class:checked={checking.includes(c.id)} class:failed={!c.ok}>
+            <button
+              class="check"
+              onclick={() => onCheckCompleted(c.id)}
+              title={S.completedDismissTip}
+              aria-label={S.completedDismissTip}
+            >
+              {#if checking.includes(c.id)}✓{:else}{c.ok ? "○" : "✗"}{/if}
+            </button>
+            {#if outputHistory[c.id]}
+              <button class="qtext detail-toggle" onclick={() => toggleDetail(c.id)} title={S.completedDetailTip}>
+                <span class="caret">{expandedId === c.id ? "▾" : "▸"}</span>{truncate(c.prompt)}
+              </button>
+            {:else}
+              <span class="qtext">{truncate(c.prompt)}</span>
+            {/if}
+            {#if !c.ok}<span class="qstate fail">{S.completedFailed}</span>{/if}
+          </div>
+          {#if expandedId === c.id && outputHistory[c.id]}
+            <div class="qdetail">
+              {#if outputHistory[c.id].tools.length}
+                <div class="otools">
+                  {#each outputHistory[c.id].tools as t, i (i)}<span class="otool">🔧 {t}</span>{/each}
+                </div>
+              {/if}
+              {#if outputHistory[c.id].text}<div class="qdetail-text">{outputHistory[c.id].text}</div>{/if}
+            </div>
+          {/if}
+        {/each}
+      </div>
+    {/if}
   {/if}
 
   <!-- 串流結果回顯:背景任務執行中即時顯示助手文字 / 工具呼叫,結束顯示最終結果 -->
@@ -927,14 +933,27 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    max-height: 150px;
-    overflow-y: auto;
     padding: 8px 10px;
     border: 1px solid var(--panel-border);
     border-radius: 8px;
     background: var(--panel-bg);
     font-size: 13px;
     color: #ccc;
+  }
+  /* 排隊/執行中:列數多時自己捲(獨立區域,與已完成區互不影響) */
+  .queue.active {
+    max-height: 130px;
+    overflow-y: auto;
+  }
+  /* 已完成:不自己捲動,隨內容(含就地展開的細節)長高。
+     如此展開時只剩 .qdetail-text 一條捲軸,不會與外層巢狀。 */
+  .queue.completed {
+    overflow: visible;
+  }
+  .qsection {
+    font-size: 11px;
+    color: #777;
+    padding-bottom: 2px;
   }
   .qrow {
     display: flex;
