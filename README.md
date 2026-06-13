@@ -11,11 +11,9 @@
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB?style=flat-square)](https://tauri.app)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](#license)
 
+**English** · [繁體中文](README.zh-TW.md)
+
 </div>
-
----
-
-> FreeCowork 是一個 Windows 系統匣常駐小工具。按 `Alt+H` 叫出輸入框,用講的或打字說出需求,AI 就**直接在你電腦上動手做**——整理檔案、改名、查資料、開程式都行。可用**免費**的 Ollama 雲端開源模型(只需到 ollama.com 免費登入一次,免 API key),或接你自己的 Anthropic Claude 帳號。設計理念:**越無腦越好**,讓完全不懂技術的人也能享受 AI 幫忙幹活。
 
 ---
 
