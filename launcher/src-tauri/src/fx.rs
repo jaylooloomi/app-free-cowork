@@ -8,20 +8,27 @@ pub fn effects_applied() -> bool {
     EFFECTS_APPLIED.load(Ordering::Relaxed)
 }
 
-/// Version-aware acrylic for the palette window.
+/// Frosted-glass blur for the palette window.
 ///
-/// - Win11 22523+:系統 backdrop acrylic(DWMSBT_TRANSIENTWINDOW;tint 參數被忽略)。
-/// - Win10 1809(build 17763)..Win11:SWCA acrylic 加深色 tint
-///   (已知拖曳會卡頓,但 palette 固定大小、不可拖曳,無影響)。
-/// - 更舊:不套效果——透明視窗若無效果會整片透視,
-///   因此以 EFFECTS_APPLIED=false 讓前端改用純色背景。
+/// IMPORTANT (verified against window-vibrancy 0.7.1 source + build 22621):
+/// `apply_acrylic` on Win11 22523+ takes the `DwmSetWindowAttribute(DWMSBT_…)`
+/// system-backdrop path, which does NOT render behind a Tauri `transparent:true`
+/// window (you just see through to the desktop, no blur, tint ignored). So we
+/// use `apply_blur` instead: on every build 17763+ it uses the legacy SWCA
+/// `ACCENT_ENABLE_BLURBEHIND` path, which DOES composite a blurred+tinted
+/// backdrop under a transparent window — the iOS-style frosted glass we want.
+/// (Drag-lag is irrelevant: the palette is fixed-size and non-draggable.)
+///
+/// Older than 1809 → no effect; EFFECTS_APPLIED=false makes the UI fall back to
+/// a solid background so a transparent window isn't fully see-through.
 pub fn apply_palette_effects(window: &tauri::WebviewWindow) {
     let build = windows_version::OsVersion::current().build;
     let result = if build >= 17763 {
-        window_vibrancy::apply_acrylic(window, Some((20, 20, 28, 160)))
+        // Dark, semi-transparent tint over the OS blur (R, G, B, A).
+        window_vibrancy::apply_blur(window, Some((18, 18, 26, 140)))
     } else {
         Err(window_vibrancy::Error::UnsupportedPlatformVersion(
-            "acrylic requires Windows 10 v1809 (build 17763) or newer",
+            "blur requires Windows 10 v1809 (build 17763) or newer",
         ))
     };
     EFFECTS_APPLIED.store(result.is_ok(), Ordering::Relaxed);

@@ -12,12 +12,12 @@ body {
    effect was applied (fx::EFFECTS_APPLIED). Wizard/settings never set these,
    so they keep the default #181818 above. */
 body.fx-glass {
-  /* 不全透明:加一層深色 wash 疊在 OS acrylic 上,
-     淺色主題的 Win11 也能維持深色面板對比(html:has 規則維持透明讓 acrylic 透出)。 */
-  background: rgba(24, 24, 28, 0.55);
+  /* 只加一層很淡的深色 wash 維持文字對比,主要的模糊由 OS blur-behind 提供
+     (太重的 wash 會把模糊蓋掉,看起來就像沒效果)。 */
+  background: rgba(20, 20, 28, 0.25);
   overflow: hidden;
-  --panel-bg: rgba(30, 30, 40, 0.5);
-  --panel-border: rgba(255, 255, 255, 0.12);
+  --panel-bg: rgba(36, 36, 48, 0.42);
+  --panel-border: rgba(255, 255, 255, 0.14);
 }
 
 /* html 的背景會繪滿整個 canvas(蓋在 body 後面),不一併透明的話
