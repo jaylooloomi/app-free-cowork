@@ -7,7 +7,16 @@ pub struct LaunchSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub background: bool,
+    /// 額外環境變數(spawn 時套用)。Ollama 路徑會設 CLAUDE_CODE_MAX_OUTPUT_TOKENS
+    /// 上限,避免小模型(輸出上限低於 Claude Code 預設 32000)回 400。
+    pub env: Vec<(String, String)>,
 }
+
+/// 安全的輸出上限:Claude Code 預設一次要 32000 output tokens,許多開源模型上限
+/// 較低(實測 rnj-1:8b 僅 16384)。設此上限讓「只是輸出上限低」的模型可用,且
+/// 對大模型無害(實測 minimax-m2.5 設 16384 仍正常)。只用於 Ollama 路徑;
+/// 真 Claude(Anthropic 帳號)不設限,保留完整能力。
+const OLLAMA_MAX_OUTPUT_TOKENS: &str = "16384";
 
 /// claude 的執行檔路徑:優先 `%USERPROFILE%\.local\bin\claude.exe`,否則靠 PATH。
 fn claude_program() -> String {
@@ -44,6 +53,7 @@ pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec 
             args,
             cwd: s.effective_working_dir(),
             background: s.background_mode,
+            env: Vec::new(), // 真 Claude 不限制輸出
         };
     }
 
@@ -65,6 +75,7 @@ pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec 
         args,
         cwd: s.effective_working_dir(),
         background: s.background_mode,
+        env: vec![("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), OLLAMA_MAX_OUTPUT_TOKENS.into())],
     }
 }
 
@@ -114,6 +125,9 @@ pub fn spawn(spec: &LaunchSpec, log_path: PathBuf, on_done: Option<OnDone>) -> s
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args).current_dir(&spec.cwd);
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
     if spec.background {
         let log = std::fs::File::create(&log_path)?;
         let log2 = log.try_clone()?;
@@ -165,6 +179,7 @@ mod tests {
             args: vec!["/c".into(), "exit 7".into()],
             cwd: dir.path().to_path_buf(),
             background: false,
+            env: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         spawn(&spec, log.clone(), Some(Box::new(move |code, path, elapsed| {
@@ -186,6 +201,7 @@ mod tests {
             args: vec!["/c".into(), "exit 0".into()],
             cwd: dir.path().to_path_buf(),
             background: false,
+            env: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         let pid = spawn(&spec, log, Some(Box::new(move |code, _path, elapsed| {
@@ -211,6 +227,18 @@ mod tests {
         );
         assert_eq!(spec.args, vec!["--dangerously-skip-permissions", "看這張圖"]);
         assert!(!spec.args.iter().any(|a| a == "launch" || a == "--model"));
+        // 真 Claude 不限制輸出
+        assert!(spec.env.is_empty());
+    }
+
+    #[test]
+    fn ollama_path_caps_max_output_tokens() {
+        // 小模型(輸出上限 < 32000)會 400;Ollama 路徑統一設 16384 上限
+        let spec = build_launch_spec("p", &Settings::default(), "minimax-m2.5:cloud");
+        assert!(spec
+            .env
+            .iter()
+            .any(|(k, v)| k == "CLAUDE_CODE_MAX_OUTPUT_TOKENS" && v == "16384"));
     }
 
     #[test]
@@ -297,6 +325,7 @@ mod tests {
             args: vec!["/c".into(), "echo out-line & echo err-line 1>&2 & exit 3".into()],
             cwd: dir.path().to_path_buf(),
             background: true,
+            env: Vec::new(),
         };
         let (tx, rx) = mpsc::channel();
         spawn(&spec, log.clone(), Some(Box::new(move |code, path, _elapsed| { tx.send((code, path)).unwrap(); }))).unwrap();
