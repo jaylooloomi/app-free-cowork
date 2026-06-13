@@ -9,6 +9,11 @@ export interface Settings {
   autostart: boolean;
   history: string[];
   signin_state: "Unknown" | "Yes" | "No";
+  known_subscription_models?: string[];
+  known_free_models?: string[];
+  known_broken_models?: string[];
+  /** 介面語言 */
+  locale: "zh-TW" | "en";
 }
 
 export interface StatusDto {
@@ -38,7 +43,7 @@ export interface QueueDto {
 
 export interface ModelEntry {
   name: string;
-  tier: "free" | "subscription" | "unknown" | "anthropic" | "broken";
+  tier: "free" | "subscription" | "unknown" | "anthropic" | "broken" | "incompatible";
 }
 
 export interface ScanSummary {

@@ -23,6 +23,8 @@ pub struct Settings {
     pub known_free_models: Vec<String>,
     /// 掃描到「無法使用」的模型(非 403 的錯誤,如不存在/暫時故障)。
     pub known_broken_models: Vec<String>,
+    /// 介面語言:"zh-TW"(預設)或 "en"。前端 UI 與後端通知/錯誤訊息都依此切換。
+    pub locale: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -38,6 +40,7 @@ impl Default for Settings {
             known_subscription_models: Vec::new(),
             known_free_models: Vec::new(),
             known_broken_models: Vec::new(),
+            locale: "zh-TW".into(),
         }
     }
 }

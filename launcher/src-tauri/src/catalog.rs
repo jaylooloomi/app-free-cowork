@@ -23,17 +23,22 @@ pub const CATALOG_URL: &str = "https://ollama.com/api/tags";
 /// Models empirically verified to respond on the free plan (full catalog scan
 /// 2026-06-13, all 42 cloud models classified). Used by the picker to label
 /// tiers; anything not listed here and not learned at runtime shows "unknown".
-pub const VERIFIED_FREE: [&str; 27] = [
+pub const VERIFIED_FREE: [&str; 26] = [
     "qwen3-vl:235b-cloud", "qwen3-vl:235b-instruct-cloud", "qwen3-coder-next:cloud",
     "qwen3-next:80b-cloud", "qwen3-coder:480b-cloud", "minimax-m2.5:cloud", "glm-4.7:cloud",
     "gpt-oss:120b-cloud", "gpt-oss:20b-cloud", "gemma3:4b-cloud", "gemma3:12b-cloud",
     "gemma3:27b-cloud", "gemma4:31b-cloud", "ministral-3:3b-cloud", "ministral-3:8b-cloud",
     "ministral-3:14b-cloud", "devstral-2:123b-cloud", "devstral-small-2:24b-cloud",
-    "cogito-2.1:671b-cloud", "nemotron-3-nano:30b-cloud", "rnj-1:8b-cloud",
+    "cogito-2.1:671b-cloud", "nemotron-3-nano:30b-cloud",
     // 2026-06-13 補掃
     "glm-4.6:cloud", "minimax-m2:cloud", "minimax-m2.1:cloud", "minimax-m3:cloud",
     "nemotron-3-super:cloud", "nemotron-3-ultra:cloud",
 ];
+
+/// 帳號免費可連、但實測無法跑 Claude Code 的模型(即使把輸出上限降到最低仍回
+/// 400 Bad Request — 多半是太小/缺工具呼叫能力)。標示「不支援」,預設過濾隱藏。
+/// 2026-06-13:rnj-1:8b 在 cap=4096 仍 400。
+pub const VERIFIED_INCOMPATIBLE: [&str; 1] = ["rnj-1:8b-cloud"];
 
 /// Models empirically verified to be subscription-gated (HTTP 403 "requires a
 /// subscription"; full catalog scan 2026-06-13). The picker labels these

@@ -93,7 +93,8 @@ pub fn get_settings(state: State<AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 
-/// server-side overlay:以「目前記憶體設定」為底,只接受 UI 可編輯的 6 個欄位。
+/// server-side overlay:以「目前記憶體設定」為底,只接受 UI 可編輯的欄位
+/// (hotkey/model/cautious/background/working_dir/autostart/locale)。
 /// history/signin_state/known_*_models 由後端在設定視窗開啟期間持續更新
 /// (submit_prompt、tier learning、被動學習、掃描、auth re-lock),不可被前端的舊快照蓋掉。
 fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
@@ -104,6 +105,7 @@ fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
         background_mode: incoming.background_mode,
         working_dir: incoming.working_dir.clone(),
         autostart: incoming.autostart,
+        locale: incoming.locale.clone(),
         history: current.history.clone(),
         signin_state: current.signin_state.clone(),
         known_subscription_models: current.known_subscription_models.clone(),
@@ -782,6 +784,9 @@ fn compute_tier(
 ) -> &'static str {
     if name == catalog::CLAUDE_MODEL {
         "anthropic"
+    } else if catalog::VERIFIED_INCOMPATIBLE.contains(&name) {
+        // 免費可連但跑不動 Claude Code — 最高優先,避免被誤標成 free
+        "incompatible"
     } else if known_broken.iter().any(|m| m == name) {
         "broken"
     } else if catalog::VERIFIED_SUBSCRIPTION.contains(&name) || known_subscription.iter().any(|m| m == name) {
@@ -1311,6 +1316,7 @@ mod tests {
             background_mode: true,
             working_dir: r"C:\work".into(),
             autostart: false,
+            locale: "en".into(),
             // 前端的舊快照 — 必須被忽略
             history: vec!["stale".into()],
             signin_state: SigninState::No,
@@ -1325,6 +1331,7 @@ mod tests {
         assert!(merged.background_mode);
         assert_eq!(merged.working_dir, r"C:\work");
         assert!(!merged.autostart);
+        assert_eq!(merged.locale, "en", "locale 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.history, vec!["真實歷史".to_string()], "history 以記憶體為準");
         assert_eq!(merged.signin_state, SigninState::Yes, "signin_state 以記憶體為準");
         assert_eq!(
@@ -1399,6 +1406,8 @@ mod tests {
         assert_eq!(compute_tier("nobody-knows:cloud", &none, &none, &none), "unknown");
         // claude 哨符
         assert_eq!(compute_tier("claude", &none, &none, &none), "anthropic");
+        // 不支援 Claude Code(免費可連但跑不動)
+        assert_eq!(compute_tier("rnj-1:8b-cloud", &none, &none, &none), "incompatible");
         // 優先序:broken 蓋過 free(learned-broken 不被實證免費遮蓋)
         let broken_qwen = vec!["qwen3-coder-next:cloud".to_string()];
         assert_eq!(compute_tier("qwen3-coder-next:cloud", &none, &none, &broken_qwen), "broken");

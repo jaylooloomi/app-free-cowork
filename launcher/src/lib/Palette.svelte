@@ -368,6 +368,7 @@
     unknown: S.tierUnknown,
     anthropic: S.tierAnthropic,
     broken: S.tierBroken,
+    incompatible: S.tierIncompatible,
   };
 
   // ✓ 以設定檔的 model 為準(offline 時 status.model 可能不可靠),退回 status?.model
@@ -774,6 +775,10 @@
   .badge.anthropic {
     color: #c8a2ff;
     background: rgba(200, 162, 255, 0.15);
+  }
+  .badge.incompatible {
+    color: #b0b0b0;
+    background: rgba(176, 176, 176, 0.12);
   }
   .badge.broken {
     color: #f7768e;

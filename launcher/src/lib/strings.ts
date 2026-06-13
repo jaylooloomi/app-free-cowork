@@ -41,6 +41,7 @@ export const S = {
   tierUnknown: "未知",
   tierAnthropic: "你的 Claude 帳號",
   tierBroken: "無法使用",
+  tierIncompatible: "不支援",
   modelScan: "🔍 檢查可用性",
   modelScanning: (d: number, t: number) => `檢查中 ${d}/${t}…`,
   modelScanDone: (s: { free: number; subscription: number; broken: number; scanned: number; skipped: number }) =>
