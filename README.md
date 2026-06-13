@@ -11,7 +11,7 @@
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB?style=flat-square)](https://tauri.app)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](#license)
 
-**English** · [繁體中文](README.zh-TW.md)
+🌐 &nbsp; **English** &nbsp;·&nbsp; [繁體中文](README.zh-TW.md)
 
 </div>
 
