@@ -44,6 +44,7 @@
   let taskResult = $state<string | null>(null); // result 行的最終文字
   let taskError = $state(false);
   let streamEl: HTMLElement | null = $state(null); // 串流文字區,用於自動捲到底
+  let dismissTimer: number | undefined; // 任務完成後自動收起「執行結果」面板的計時器
   // 目前任務的世代號(= 後端 task id):只接受 gen 相符的串流事件,
   // 避免跨任務事件投遞競爭把舊任務輸出混進新任務。
   let activeGen = $state<number | null>(null);
@@ -166,6 +167,12 @@
       if (text || taskTools.length) {
         outputHistory[e.payload.gen] = { text, tools: [...taskTools] };
       }
+      // 完成後約 5 秒自動收起「執行結果」面板(詳細仍保留在「已完成」清單可回看);
+      // 新任務開始 / 重開面板 / 手動關閉都會經 resetTaskOutput 取消此計時器。
+      clearTimeout(dismissTimer);
+      dismissTimer = window.setTimeout(() => {
+        if (!taskRunning) dismissOutput();
+      }, 5000);
     });
     // busy(任務送出中)時不自動隱藏 — 避免提交瞬間失焦把面板關掉
     const onBlur = () => {
@@ -198,6 +205,7 @@
       ro.disconnect();
       clearTimeout(transientTimer);
       clearTimeout(listenTimer);
+      clearTimeout(dismissTimer);
     };
   });
 
@@ -305,6 +313,8 @@
   }
 
   function resetTaskOutput(running: boolean) {
+    // 取消待執行的自動收起(新任務開始 / 重開面板 / 手動關閉都會經過這裡)
+    clearTimeout(dismissTimer);
     taskText = "";
     taskTools = [];
     taskResult = null;
