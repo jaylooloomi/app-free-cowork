@@ -46,6 +46,7 @@
         ...fresh,
         hotkey: snap.hotkey,
         voice_hotkey: snap.voice_hotkey,
+        capture_hotkey: snap.capture_hotkey,
         model: snap.model,
         cautious_mode: snap.cautious_mode,
         background_mode: snap.background_mode,
@@ -57,8 +58,12 @@
       // 失敗(例:快捷鍵註冊失敗)→ 後端已回滾,顯示訊息,欄位保持可編輯重試
       await api.saveSettings(merged);
       saved = true;
+      // 顯示「已儲存 ✓」約 0.6 秒當回饋,然後關閉(隱藏)設定視窗;失敗則不關,留著修。
       clearTimeout(savedTimer);
-      savedTimer = setTimeout(() => (saved = false), 1500);
+      savedTimer = setTimeout(() => {
+        saved = false;
+        api.hideSettings().catch(() => {});
+      }, 600);
     } catch (e) {
       error = String(e);
     }
@@ -92,6 +97,11 @@
       >{S.settingsVoiceHotkey}
       <input bind:value={s.voice_hotkey} placeholder={S.settingsVoiceHotkeyPlaceholder} />
       <small>{S.settingsVoiceHotkeyHint}</small></label
+    >
+    <label
+      >{S.settingsCaptureHotkey}
+      <input bind:value={s.capture_hotkey} placeholder={S.settingsCaptureHotkeyPlaceholder} />
+      <small>{S.settingsCaptureHotkeyHint}</small></label
     >
     <label
       >{S.settingsModel}

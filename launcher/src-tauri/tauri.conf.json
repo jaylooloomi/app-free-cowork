@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Free Claude Code",
+  "productName": "FreeCowork",
   "version": "0.1.0",
   "identifier": "com.jaylooloomi.free-claude-code",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "palette",
-        "title": "Free Claude Code",
+        "title": "FreeCowork",
         "theme": "Dark",
         "width": 640,
         "height": 168,
@@ -28,7 +28,7 @@
       },
       {
         "label": "wizard",
-        "title": "Free Claude Code 首次設定",
+        "title": "FreeCowork 首次設定",
         "width": 560,
         "height": 540,
         "visible": false,
@@ -36,7 +36,7 @@
       },
       {
         "label": "settings",
-        "title": "Free Claude Code 設定",
+        "title": "FreeCowork 設定",
         "width": 560,
         "height": 600,
         "visible": false,
@@ -56,6 +56,7 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
+    "resources": ["icons/128x128.png", "icons/icon.ico"],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" },
       "nsis": {

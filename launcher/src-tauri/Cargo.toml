@@ -32,7 +32,14 @@ tauri-plugin-single-instance = "2.4.2"
 tauri-plugin-notification = "2.3.3"
 window-vibrancy = "0.7.1"
 windows-version = "0.1.7"
-windows = { version = "0.62.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation"] }
+# 截圖功能:讀剪貼簿影像(框選截圖後)+ 編碼 PNG
+arboard = "3.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+# 原生「選擇資料夾」對話框
+rfd = "0.15"
+# 通知 icon:把 AUMID 綁定到 icon(寫 HKCU AppUserModelId 機碼)
+winreg = "0.52"
+windows = { version = "0.62.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 # Serializes the two signin tests that contend on the process-global SIGNIN_GUARD

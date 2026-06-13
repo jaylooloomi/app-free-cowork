@@ -18,9 +18,63 @@ use tauri::{AppHandle, Emitter as _, Manager};
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+/// 本 app 的 AppUserModelID,必須與安裝捷徑、登錄機碼三者一致,Windows 才能
+/// 正確解析 toast 左上角的歸屬 icon。
+const APP_USER_MODEL_ID: &str = "com.jaylooloomi.free-claude-code";
+
+/// 解析隨安裝包帶入的 icon 檔(優先 .ico,退回 128x128.png)。
+fn toast_icon_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let dir = app.path().resource_dir().ok()?;
+    let ico = dir.join("icons").join("icon.ico");
+    if ico.exists() {
+        return Some(ico);
+    }
+    let png = dir.join("icons").join("128x128.png");
+    png.exists().then_some(png)
+}
+
+/// resource_dir() 在 Windows 會回傳帶 `\\?\` 擴充長度前綴的路徑;Windows 殼層
+/// /通知的 icon 解析不吃這種前綴,寫進 IconUri / .icon() 前先去掉它。
+fn clean_path_string(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+}
+
 pub fn notify(app: &AppHandle, body: &str) {
     use tauri_plugin_notification::NotificationExt;
-    let _ = app.notification().builder().title("Free Claude Code").body(body).show();
+    let mut builder = app.notification().builder().title("FreeCowork").body(body);
+    // .icon() 只填 toast 內文的 appLogoOverride;左上角歸屬 icon 由 AUMID 登錄
+    // 機碼決定(見 register_toast_icon)。兩者都設,通知才完整顯示本 app 圖示。
+    if let Some(icon) = toast_icon_path(app) {
+        builder = builder.icon(clean_path_string(&icon));
+    }
+    let _ = builder.show();
+}
+
+/// 讓本行程明確採用與捷徑/登錄一致的 AUMID;否則 Windows 可能用預設值,
+/// 與登錄機碼對不上,toast 就找不到 icon。必須在顯示任何通知前呼叫。
+#[cfg(windows)]
+fn set_app_user_model_id() {
+    use windows::core::w;
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    unsafe {
+        let _ = SetCurrentProcessExplicitAppUserModelID(w!("com.jaylooloomi.free-claude-code"));
+    }
+}
+
+/// 把 AUMID 綁定到 app icon:寫 HKCU\Software\Classes\AppUserModelId\<id>
+/// 的 DisplayName / IconUri。這是 Windows 為「未封裝(NSIS)應用」決定 toast
+/// 左上角 icon 的唯一來源。冪等(每次啟動重寫),可直接修好已安裝的機器、
+/// 重裝也存活。失敗只略過(通知仍會顯示,只是沒左上角 icon)。
+fn register_toast_icon(app: &AppHandle) {
+    let Some(icon) = toast_icon_path(app) else { return };
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let path = format!(r"Software\Classes\AppUserModelId\{APP_USER_MODEL_ID}");
+    if let Ok((key, _)) = hkcu.create_subkey(&path) {
+        let _ = key.set_value("DisplayName", &"FreeCowork".to_string());
+        let _ = key.set_value("IconUri", &clean_path_string(&icon));
+        let _ = key.set_value("IconBackgroundColor", &"FF2D2D2D".to_string());
+    }
 }
 
 pub fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
@@ -72,7 +126,7 @@ fn handle_argv(app: &AppHandle, argv: &[String]) {
             let prompt = prompt.clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
-                if let Err(e) = ipc::submit_prompt(handle.clone(), state, prompt).await {
+                if let Err(e) = ipc::submit_prompt(handle.clone(), state, prompt, None).await {
                     notify(&handle, &e);
                 }
             });
@@ -111,7 +165,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 .clone(),
         )
         .menu(&menu)
-        .tooltip("Free Claude Code")
+        .tooltip("FreeCowork")
         .on_menu_event(|app, e| match e.id.as_ref() {
             "open" => show_palette_centered(app),
             "settings" => ipc::show_window(app, "settings"),
@@ -124,6 +178,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // toast 左上角 icon 靠 AUMID 解析 → 行程一啟動就採用固定 AUMID(早於任何通知)。
+    #[cfg(windows)]
+    set_app_user_model_id();
     let loaded = settings::load(&settings::settings_path());
     tauri::Builder::default()
         // single-instance 必須最先註冊(Tauri 文件要求)
@@ -154,9 +211,11 @@ pub fn run() {
             ipc::list_cloud_models,
             ipc::open_logs,
             ipc::hide_palette,
+            ipc::hide_settings,
             ipc::open_settings_window,
             ipc::queue_list,
             ipc::queue_cancel,
+            ipc::dismiss_completed,
             ipc::task_stop,
             ipc::list_models_ui,
             ipc::set_model,
@@ -164,7 +223,9 @@ pub fn run() {
             ipc::open_url,
             ipc::start_voice_input,
             ipc::effects_applied,
-            ipc::save_pasted_image
+            ipc::save_pasted_image,
+            ipc::capture_screenshot,
+            ipc::pick_folder
         ])
         .on_window_event(|window, event| {
             // 三個視窗都只隱藏、永不關閉 — 否則 X 會銷毀視窗導致 app 結束
@@ -183,6 +244,8 @@ pub fn run() {
                 ipc::show_window(&handle, "settings");
             }
             sync_autostart(&handle, loaded.autostart);
+            // 綁定 AUMID→icon 登錄機碼(修好 toast 左上角 icon;冪等)
+            register_toast_icon(&handle);
             refresh_catalog(handle.clone());
             ipc::refresh_plan(handle.clone());
             build_tray(&handle)?;
