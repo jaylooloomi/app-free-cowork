@@ -219,9 +219,15 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
             }
         }
     }
-    let (model, _) = catalog::choose_model(&s.model, &cat);
+    // 顯示「實際會用」的模型;若選中的不可用,switch_notice 提示已自動改用免費模型
+    let (model, switch_notice) = resolve_usable_model(&s, &cat);
     Ok(match status {
-        doctor::Status::Ready => StatusDto { state: "ready".into(), model, detail: String::new(), plan },
+        doctor::Status::Ready => StatusDto {
+            state: "ready".into(),
+            model,
+            detail: switch_notice.unwrap_or_default(),
+            plan,
+        },
         doctor::Status::NeedsSetup { .. } => StatusDto {
             state: "needs_setup".into(),
             model,
@@ -454,9 +460,15 @@ pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
 fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(), String> {
     let s = state.settings.lock().unwrap().clone();
     let cat = state.catalog_cache.lock().unwrap().clone();
-    let (model, notice) = catalog::choose_model(&s.model, &cat);
+    let (model, notice) = resolve_usable_model(&s, &cat);
     if let Some(n) = notice {
         crate::notify(app, &n);
+    }
+    // 自動切換非 claude 模型時把新模型寫回設定(讓 chip/✓/下次啟動一致)
+    if model != s.model && model != catalog::CLAUDE_MODEL {
+        let mut st = state.settings.lock().unwrap();
+        st.model = model.clone();
+        let _ = settings::save(&settings::settings_path(), &st);
     }
     let spec = launcher::build_launch_spec(&task.prompt, &s, &model);
     let is_background = spec.background;
@@ -801,6 +813,49 @@ fn compute_tier(
     } else {
         "unknown"
     }
+}
+
+/// 解析「實際要用的模型」:先處理目錄 fallback(choose_model),再做 tier 檢查 —
+/// 若選中的模型不可用(incompatible/subscription/broken),自動改用目錄中第一個
+/// 免費模型(優先 FALLBACKS 順序)。回傳 (model, 若有自動切換的通知)。
+/// claude(Anthropic 帳號)永遠原樣。
+fn resolve_usable_model(s: &Settings, catalog: &[String]) -> (String, Option<String>) {
+    if s.model == catalog::CLAUDE_MODEL {
+        return (catalog::CLAUDE_MODEL.to_string(), None);
+    }
+    let (model, notice) = catalog::choose_model(&s.model, catalog);
+    let tier = compute_tier(
+        &model,
+        &s.known_subscription_models,
+        &s.known_free_models,
+        &s.known_broken_models,
+    );
+    if matches!(tier, "incompatible" | "subscription" | "broken") {
+        let pick = catalog::FALLBACKS
+            .iter()
+            .find(|f| catalog.iter().any(|c| c == *f))
+            .map(|f| f.to_string())
+            .or_else(|| {
+                catalog
+                    .iter()
+                    .find(|m| {
+                        compute_tier(
+                            m,
+                            &s.known_subscription_models,
+                            &s.known_free_models,
+                            &s.known_broken_models,
+                        ) == "free"
+                    })
+                    .cloned()
+            });
+        if let Some(p) = pick {
+            if p != model {
+                let n = crate::i18n::model_auto_switched(&model, &p, tier);
+                return (p, Some(n));
+            }
+        }
+    }
+    (model, notice)
 }
 
 #[tauri::command]
@@ -1423,6 +1478,35 @@ mod tests {
         // 優先序:subscription 蓋過 free
         let sub_qwen = vec!["qwen3-coder-next:cloud".to_string()];
         assert_eq!(compute_tier("qwen3-coder-next:cloud", &sub_qwen, &none, &none), "subscription");
+    }
+
+    #[test]
+    fn resolve_usable_model_switches_away_from_unusable() {
+        let cat: Vec<String> = vec![
+            "rnj-1:8b-cloud".into(),
+            "deepseek-v3.2:cloud".into(),
+            "minimax-m2.5:cloud".into(),
+            "qwen3-coder-next:cloud".into(),
+        ];
+        // 不支援 → 換成第一個免費(FALLBACKS[0] = minimax-m2.5,在目錄內)
+        let s = Settings { model: "rnj-1:8b-cloud".into(), ..Default::default() };
+        let (m, notice) = resolve_usable_model(&s, &cat);
+        assert_eq!(m, "minimax-m2.5:cloud");
+        assert!(notice.is_some());
+        // 需訂閱 → 同樣自動換走
+        let s = Settings { model: "deepseek-v3.2:cloud".into(), ..Default::default() };
+        let (m, _) = resolve_usable_model(&s, &cat);
+        assert_eq!(m, "minimax-m2.5:cloud");
+        // 本來就免費 → 不動、無通知
+        let s = Settings { model: "qwen3-coder-next:cloud".into(), ..Default::default() };
+        let (m, notice) = resolve_usable_model(&s, &cat);
+        assert_eq!(m, "qwen3-coder-next:cloud");
+        assert!(notice.is_none());
+        // claude → 永遠原樣
+        let s = Settings { model: "claude".into(), ..Default::default() };
+        let (m, notice) = resolve_usable_model(&s, &cat);
+        assert_eq!(m, "claude");
+        assert!(notice.is_none());
     }
 
     #[test]

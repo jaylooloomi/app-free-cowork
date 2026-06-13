@@ -53,6 +53,29 @@ pub fn claude_status_unknown() -> String {
     }
 }
 
+/// 選中的模型不可用(不支援/需訂閱/壞掉)→ 自動改用免費模型。
+/// reason_tier: "incompatible" / "subscription" / "broken"。
+pub fn model_auto_switched(from: &str, to: &str, reason_tier: &str) -> String {
+    match current() {
+        Locale::ZhTw => {
+            let why = match reason_tier {
+                "incompatible" => "不支援 Claude Code",
+                "subscription" => "需訂閱",
+                _ => "目前無法使用",
+            };
+            format!("「{from}」{why},已自動改用「{to}」")
+        }
+        Locale::En => {
+            let why = match reason_tier {
+                "incompatible" => "is unsupported by Claude Code",
+                "subscription" => "requires a subscription",
+                _ => "is currently unavailable",
+            };
+            format!("\"{from}\" {why}; switched to \"{to}\"")
+        }
+    }
+}
+
 /// 雲端目錄抓不到 → 離線。
 pub fn offline_cloud_needs_network() -> String {
     match current() {
