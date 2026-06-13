@@ -1,0 +1,37 @@
+html,
+body {
+  margin: 0;
+  background: #181818;
+  /* Palette 表面樣式變數 — 預設(含尚未判定 fx 模式時)為純色,
+     body.fx-glass 才切換成半透明,讓 OS acrylic 透出來。 */
+  --panel-bg: #1e1e1e;
+  --panel-border: #444;
+}
+
+/* Palette-only opt-ins, toggled by JS depending on whether the OS acrylic
+   effect was applied (fx::EFFECTS_APPLIED). Wizard/settings never set these,
+   so they keep the default #181818 above. */
+body.fx-glass {
+  /* 只加一層很淡的深色 wash 維持文字對比,主要的模糊由 OS blur-behind 提供
+     (太重的 wash 會把模糊蓋掉,看起來就像沒效果)。 */
+  background: rgba(20, 20, 28, 0.25);
+  overflow: hidden;
+  --panel-bg: rgba(36, 36, 48, 0.42);
+  --panel-border: rgba(255, 255, 255, 0.14);
+}
+
+/* html 的背景會繪滿整個 canvas(蓋在 body 後面),不一併透明的話
+   acrylic 仍會被 #181818 擋住。:has() 在 WebView2 (Chromium 105+) 可用。 */
+html:has(body.fx-glass) {
+  background: transparent;
+}
+
+body.fx-solid {
+  background: #181818;
+  overflow: hidden;
+}
+
+* {
+  box-sizing: border-box;
+  font-family: "Segoe UI", "Microsoft JhengHei", sans-serif;
+}
