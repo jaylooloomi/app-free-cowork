@@ -16,6 +16,8 @@ export interface Settings {
   locale: "zh-TW" | "en";
   /** 面板開著時啟動語音輸入的快捷鍵(預設 "Alt+J") */
   voice_hotkey: string;
+  /** 面板開著時啟動框選截圖的快捷鍵(預設 "Alt+K") */
+  capture_hotkey: string;
   /** 自訂助手個性系統提示;留空 = 內建預設 */
   system_prompt: string;
 }

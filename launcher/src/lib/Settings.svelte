@@ -46,6 +46,7 @@
         ...fresh,
         hotkey: snap.hotkey,
         voice_hotkey: snap.voice_hotkey,
+        capture_hotkey: snap.capture_hotkey,
         model: snap.model,
         cautious_mode: snap.cautious_mode,
         background_mode: snap.background_mode,
@@ -92,6 +93,11 @@
       >{S.settingsVoiceHotkey}
       <input bind:value={s.voice_hotkey} placeholder={S.settingsVoiceHotkeyPlaceholder} />
       <small>{S.settingsVoiceHotkeyHint}</small></label
+    >
+    <label
+      >{S.settingsCaptureHotkey}
+      <input bind:value={s.capture_hotkey} placeholder={S.settingsCaptureHotkeyPlaceholder} />
+      <small>{S.settingsCaptureHotkeyHint}</small></label
     >
     <label
       >{S.settingsModel}

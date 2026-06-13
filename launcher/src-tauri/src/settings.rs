@@ -28,6 +28,8 @@ pub struct Settings {
     /// 面板開著時啟動語音輸入的快捷鍵(預設 "Alt+J")。這是面板內的鍵,不註冊為
     /// 全域熱鍵;前端解析此字串(如 "Alt+J"、"Ctrl+Shift+M")比對 keydown。
     pub voice_hotkey: String,
+    /// 面板開著時啟動框選截圖的快捷鍵(預設 "Alt+K");同 voice_hotkey,前端解析比對。
+    pub capture_hotkey: String,
     /// 自訂「助手個性」系統提示;留空 = 使用內建的「動手型助手」預設(依語言)。
     /// 進階使用者可改寫,改變 AI 的行事風格。
     pub system_prompt: String,
@@ -50,6 +52,7 @@ impl Default for Settings {
             known_broken_models: Vec::new(),
             locale: "zh-TW".into(),
             voice_hotkey: "Alt+J".into(),
+            capture_hotkey: "Alt+K".into(),
             system_prompt: String::new(),
         }
     }
@@ -113,6 +116,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.hotkey, "Alt+H");
         assert_eq!(s.voice_hotkey, "Alt+J");
+        assert_eq!(s.capture_hotkey, "Alt+K");
         assert_eq!(s.model, "minimax-m2.5:cloud");
         assert!(!s.cautious_mode);
         assert!(s.background_mode, "預設背景模式:無終端機 + 串流回顯");

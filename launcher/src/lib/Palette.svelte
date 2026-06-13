@@ -351,12 +351,18 @@
   }
 
   // 全域鍵(svelte:window)— 不管焦點在哪都生效:
-  // 語音快捷鍵(預設 Alt+J,可在設定調整)啟動語音輸入;Alt+H 仍是開/關面板。
+  // 語音快捷鍵(預設 Alt+J)啟動語音輸入、截圖快捷鍵(預設 Alt+K)啟動框選截圖,
+  // 兩者皆可在設定調整;Alt+H 仍是開/關面板。
   // Escape:選單開啟時先關選單,再按一次才隱藏面板。
   function onGlobalKey(e: KeyboardEvent) {
     if (matchesHotkey(e, settings?.voice_hotkey || "Alt+J")) {
       e.preventDefault();
       if (!busy && !offline) onMic();
+      return;
+    }
+    if (matchesHotkey(e, settings?.capture_hotkey || "Alt+K")) {
+      e.preventDefault();
+      if (!busy && !offline && !capturing) onCapture();
       return;
     }
     if (e.key !== "Escape") return;
@@ -569,6 +575,7 @@
   }
 
   const micTip = $derived(S.micTooltip(settings?.voice_hotkey || "Alt+J"));
+  const capTip = $derived(S.captureTooltip(settings?.capture_hotkey || "Alt+K"));
 
   // 串流中顯示累積文字;收到 result 行後改顯示其最終文字(兩者內容一致,避免重複)。
   const displayText = $derived(taskResult ?? taskText);
@@ -610,8 +617,8 @@
       onclick={onCapture}
       onmousedown={(e) => e.preventDefault()}
       disabled={busy || offline || capturing}
-      title={S.captureTooltip}
-      aria-label={S.captureTooltip}
+      title={capTip}
+      aria-label={capTip}
     >
       <svg
         viewBox="0 0 24 24"
