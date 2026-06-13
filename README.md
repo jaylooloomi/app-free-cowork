@@ -17,6 +17,10 @@
 
 ---
 
+> FreeCowork is an always-on Windows system-tray tool. Press `Alt+H` to bring up an input box, say or type what you need, and the AI **does it directly on your PC** — organizing files, renaming, looking things up, opening apps, and more. Use **free** open-source models via Ollama cloud (just one free login at ollama.com — no API key), or connect your own Anthropic Claude account. Design philosophy: **the more brain-free, the better** — so even people with zero technical background can have AI do the work for them.
+
+---
+
 ## The problem
 
 AI can do real work now — but for most people, the power is locked behind a wall:
