@@ -1,6 +1,6 @@
-# Free Claude Code 一行安裝:irm <raw-url>/install.ps1 | iex
+# FreeCowork 一行安裝:irm <raw-url>/install.ps1 | iex
 $ErrorActionPreference = "Stop"
-$repo = "jaylooloomi/free-claude-code"
+$repo = "jaylooloomi/FreeCowork"
 $api = "https://api.github.com/repos/$repo/releases/latest"
 Write-Host "[*] 取得最新版本資訊..."
 try {
