@@ -17,6 +17,6 @@ Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $out -UseBasicParsin
 Write-Host "[*] 安裝中(免系統管理員)..."
 Start-Process -FilePath $out -ArgumentList "/S" -Wait
 # NSIS currentUser 模式安裝至 $LOCALAPPDATA\<productName>(主程式 launcher.exe)
-$exe = Join-Path $env:LOCALAPPDATA "Free Claude Code\launcher.exe"
+$exe = Join-Path $env:LOCALAPPDATA "FreeCowork\launcher.exe"
 if (Test-Path $exe) { Start-Process $exe; Write-Host "[OK] 安裝完成!按 Alt+H 開始使用。" }
-else { Write-Host "[OK] 安裝完成!請從開始功能表啟動 Free Claude Code,之後按 Alt+H 使用。" }
+else { Write-Host "[OK] 安裝完成!請從開始功能表啟動 FreeCowork,之後按 Alt+H 使用。" }

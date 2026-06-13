@@ -42,7 +42,7 @@ fn clean_path_string(p: &std::path::Path) -> String {
 
 pub fn notify(app: &AppHandle, body: &str) {
     use tauri_plugin_notification::NotificationExt;
-    let mut builder = app.notification().builder().title("Free Claude Code").body(body);
+    let mut builder = app.notification().builder().title("FreeCowork").body(body);
     // .icon() 只填 toast 內文的 appLogoOverride;左上角歸屬 icon 由 AUMID 登錄
     // 機碼決定(見 register_toast_icon)。兩者都設,通知才完整顯示本 app 圖示。
     if let Some(icon) = toast_icon_path(app) {
@@ -71,7 +71,7 @@ fn register_toast_icon(app: &AppHandle) {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let path = format!(r"Software\Classes\AppUserModelId\{APP_USER_MODEL_ID}");
     if let Ok((key, _)) = hkcu.create_subkey(&path) {
-        let _ = key.set_value("DisplayName", &"Free Claude Code".to_string());
+        let _ = key.set_value("DisplayName", &"FreeCowork".to_string());
         let _ = key.set_value("IconUri", &clean_path_string(&icon));
         let _ = key.set_value("IconBackgroundColor", &"FF2D2D2D".to_string());
     }
@@ -165,7 +165,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 .clone(),
         )
         .menu(&menu)
-        .tooltip("Free Claude Code")
+        .tooltip("FreeCowork")
         .on_menu_event(|app, e| match e.id.as_ref() {
             "open" => show_palette_centered(app),
             "settings" => ipc::show_window(app, "settings"),
