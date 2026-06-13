@@ -72,7 +72,11 @@
     const gen = ++queueGen;
     try {
       const q = await api.queueList();
-      if (gen === queueGen) queue = q;
+      if (gen === queueGen) {
+        queue = q;
+        // 已從後端清單移除的項目,一併從 checking 動畫集合清掉(避免殘留 id)
+        checking = checking.filter((id) => q.completed.some((c) => c.id === id));
+      }
     } catch {
       if (gen === queueGen) queue = null;
     }
@@ -385,6 +389,17 @@
     }
   }
 
+  // 已完成項目「打勾」:先加進 checking(立即顯示 ✓ + 刪除線 + 淡出動畫),
+  // 約 0.5 秒後請後端移除。實際從清單消失靠 queue-changed → refreshQueue,
+  // 屆時 refreshQueue 會把已不在清單的 id 從 checking 清掉(見該函式),
+  // 因此不在這裡手動清,避免「移除前先閃回未打勾」的瞬間。
+  let checking = $state<number[]>([]);
+  function onCheckCompleted(id: number) {
+    if (checking.includes(id)) return;
+    checking = [...checking, id];
+    window.setTimeout(() => api.dismissCompleted(id).catch((e) => (error = String(e))), 500);
+  }
+
   // A-Z 排序,但 claude(anthropic)永遠置頂 — localeCompare 會把 "claude"
   // 按字串排到中間,因此先抽出 claude、其餘排序後再前插。
   function sortModels(list: ModelEntry[]): ModelEntry[] {
@@ -501,7 +516,9 @@
     return name === "claude" ? "Claude(Anthropic 官方)" : name;
   }
 
-  const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
+  const hasQueue = $derived(
+    !!queue && (queue.running !== null || queue.queued.length > 0 || queue.completed.length > 0),
+  );
 
   const micTip = $derived(S.micTooltip(settings?.voice_hotkey || "Alt+J"));
 
@@ -587,6 +604,20 @@
           <button class="x" onclick={() => cancelTask(t.id)} title={S.queueCancelTip} aria-label={S.queueCancelTip}>
             ✕
           </button>
+        </div>
+      {/each}
+      {#each queue.completed as c (c.id)}
+        <div class="qrow done" class:checked={checking.includes(c.id)} class:failed={!c.ok}>
+          <button
+            class="check"
+            onclick={() => onCheckCompleted(c.id)}
+            title={S.completedDismissTip}
+            aria-label={S.completedDismissTip}
+          >
+            {#if checking.includes(c.id)}✓{:else}{c.ok ? "○" : "✗"}{/if}
+          </button>
+          <span class="qtext">{truncate(c.prompt)}</span>
+          {#if !c.ok}<span class="qstate fail">{S.completedFailed}</span>{/if}
         </div>
       {/each}
     </div>
@@ -908,6 +939,44 @@
     cursor: pointer;
   }
   .x:hover {
+    color: #f7768e;
+  }
+  /* 已完成項目(待打勾移除):○ 成功(綠)/ ✗ 失敗(紅);打勾 → ✓ + 刪除線 + 淡出 */
+  .qrow.done {
+    transition: opacity 0.4s ease;
+  }
+  .qrow.done .qtext {
+    color: #aaa;
+  }
+  .check {
+    flex-shrink: 0;
+    width: 18px;
+    border: none;
+    background: none;
+    color: #9ece6a;
+    font-size: 13px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+  }
+  .qrow.failed .check {
+    color: #f7768e;
+  }
+  .check:hover {
+    filter: brightness(1.4);
+  }
+  .qrow.checked .check {
+    color: #9ece6a;
+  }
+  .qrow.checked .qtext {
+    text-decoration: line-through;
+    color: #666;
+    transition: color 0.3s ease;
+  }
+  .qrow.checked {
+    opacity: 0.45;
+  }
+  .qstate.fail {
     color: #f7768e;
   }
   .bar {

@@ -157,6 +157,7 @@ pub fn run() {
             ipc::open_settings_window,
             ipc::queue_list,
             ipc::queue_cancel,
+            ipc::dismiss_completed,
             ipc::task_stop,
             ipc::list_models_ui,
             ipc::set_model,

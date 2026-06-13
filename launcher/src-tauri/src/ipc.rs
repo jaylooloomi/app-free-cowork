@@ -43,6 +43,19 @@ pub struct RunningTask {
     pub stopping: bool,
 }
 
+/// 已完成的任務(成功或失敗)。結束時不立即丟棄,而是放進清單供使用者像待辦
+/// 一樣逐筆打勾移除。in-memory,app 重啟即清空。
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct CompletedTask {
+    pub id: u64,
+    pub prompt: String,
+    /// true = 正常結束(exit 0);false = 失敗。使用者主動停止的任務不入列。
+    pub ok: bool,
+}
+
+/// 最多保留的已完成項目數;超過則自動移除最舊的(避免使用者不打勾時無限累積)。
+const COMPLETED_CAP: usize = 5;
+
 /// 佇列狀態機:running + queued 必須在同一把鎖下變更,
 /// 否則「判斷是否執行中」與「入列/啟動」之間的空窗會讓
 /// double-submit 同時跑兩個任務、或讓佇列任務被遺落(TOCTOU)。
@@ -50,6 +63,8 @@ pub struct RunningTask {
 pub struct QueueState {
     pub running: Option<RunningTask>,
     pub queued: VecDeque<QueuedTask>,
+    /// 已完成、等待使用者打勾移除的任務(最舊在前;上限 COMPLETED_CAP)。
+    pub completed: VecDeque<CompletedTask>,
 }
 
 pub struct AppState {
@@ -417,6 +432,23 @@ fn take_next(state: &AppState) -> Option<QueuedTask> {
     pop_and_reserve_next(&mut state.queue.lock_safe())
 }
 
+/// 任務結束時把目前 running 的任務記入「已完成」清單(供面板逐筆打勾移除)。
+/// 必須在 start_or_queue_next 清掉 running 之前呼叫。`stopped`(使用者主動停止)
+/// 視為取消、不入列。超過上限時自動移除最舊的。
+fn record_completed(state: &AppState, code: i32, stopped: bool) {
+    if stopped {
+        return;
+    }
+    let mut q = state.queue.lock_safe();
+    if let Some(rt) = q.running.as_ref() {
+        let item = CompletedTask { id: rt.id, prompt: rt.prompt.clone(), ok: code == 0 };
+        q.completed.push_back(item);
+        while q.completed.len() > COMPLETED_CAP {
+            q.completed.pop_front();
+        }
+    }
+}
+
 /// 通知用的需求預覽(前 20 個字,按字元數而非位元組,CJK 安全)。
 fn prompt_preview(prompt: &str) -> String {
     prompt.chars().take(20).collect()
@@ -546,7 +578,11 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
     // 因此即使其他執行緒讓 queue/settings 中毒,on_done 也不會半途 panic ——
     // start_or_queue_next 必定執行且能推進佇列,契約得以維持(見 LockExt)。
     let on_done: launcher::OnDone = Box::new(move |code, log_path, elapsed| {
+        let st = app2.state::<AppState>();
+        // 在清掉 running 之前判定是否為使用者主動停止,並把完成項目記入清單。
+        let stopped = task_was_stopping(&st);
         handle_task_exit(&app2, code, &log_path, elapsed, is_background, &model);
+        record_completed(&st, code, stopped);
         if is_background {
             emit_task_output_end(&app2, gen, code);
         }
@@ -808,12 +844,32 @@ pub fn list_cloud_models(state: State<AppState>) -> Vec<String> {
 pub struct QueueDto {
     pub running: Option<RunningTask>,
     pub queued: Vec<QueuedTask>,
+    pub completed: Vec<CompletedTask>,
 }
 
 #[tauri::command]
 pub fn queue_list(state: State<AppState>) -> QueueDto {
     let q = state.queue.lock_safe();
-    QueueDto { running: q.running.clone(), queued: q.queued.iter().cloned().collect() }
+    QueueDto {
+        running: q.running.clone(),
+        queued: q.queued.iter().cloned().collect(),
+        completed: q.completed.iter().cloned().collect(),
+    }
+}
+
+/// 使用者打勾移除一筆已完成項目(回傳是否有移除)。
+fn remove_completed(state: &AppState, id: u64) -> bool {
+    let mut q = state.queue.lock_safe();
+    let before = q.completed.len();
+    q.completed.retain(|t| t.id != id);
+    q.completed.len() != before
+}
+
+#[tauri::command]
+pub fn dismiss_completed(state: State<AppState>, app: AppHandle, id: u64) {
+    if remove_completed(&state, id) {
+        emit_queue_changed(&app);
+    }
 }
 
 /// 純佇列變更:移除指定 id,回傳是否有移除。
@@ -1484,6 +1540,50 @@ mod tests {
         assert!(!task_was_stopping(&st));
         st.queue.lock_safe().running.as_mut().unwrap().stopping = true;
         assert!(task_was_stopping(&st));
+    }
+
+    #[test]
+    fn record_completed_tracks_outcome_skips_stopped_and_caps() {
+        let st = state();
+        // 成功(code 0)→ ok=true
+        st.queue.lock_safe().running = Some(running_task(1, true, Some(10)));
+        record_completed(&st, 0, false);
+        // 失敗(非 0)→ ok=false
+        st.queue.lock_safe().running = Some(running_task(2, true, Some(11)));
+        record_completed(&st, 1, false);
+        // 使用者主動停止 → 不入列
+        st.queue.lock_safe().running = Some(running_task(3, true, Some(12)));
+        record_completed(&st, 0, true);
+        {
+            let q = st.queue.lock_safe();
+            assert_eq!(
+                q.completed.iter().map(|c| (c.id, c.ok)).collect::<Vec<_>>(),
+                vec![(1, true), (2, false)],
+                "成功/失敗都記錄,停止不記錄"
+            );
+        }
+        // 上限 COMPLETED_CAP:再推 5 筆(id 10..14),最舊的被擠掉
+        for i in 10u64..15 {
+            st.queue.lock_safe().running = Some(running_task(i, true, Some(100 + i as u32)));
+            record_completed(&st, 0, false);
+        }
+        let q = st.queue.lock_safe();
+        assert_eq!(q.completed.len(), COMPLETED_CAP, "超過上限自動丟最舊");
+        assert_eq!(q.completed.front().unwrap().id, 10, "1、2 被擠掉,最舊保留到 id=10");
+        assert_eq!(q.completed.back().unwrap().id, 14, "最新在尾端");
+    }
+
+    #[test]
+    fn remove_completed_removes_by_id() {
+        let st = state();
+        st.queue.lock_safe().running = Some(running_task(1, true, Some(10)));
+        record_completed(&st, 0, false);
+        st.queue.lock_safe().running = Some(running_task(2, true, Some(11)));
+        record_completed(&st, 0, false);
+        assert!(remove_completed(&st, 1), "存在 → 移除回傳 true");
+        assert!(!remove_completed(&st, 999), "不存在 → 回傳 false");
+        let q = st.queue.lock_safe();
+        assert_eq!(q.completed.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2]);
     }
 
     /// M1:save_settings 只接受 6 個 UI 欄位;server-side 欄位以記憶體現值為準。
