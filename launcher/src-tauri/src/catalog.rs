@@ -20,24 +20,31 @@ pub fn parse_cloud_models(api_tags_json: &str) -> Option<Vec<String>> {
 pub const FALLBACKS: [&str; 2] = ["minimax-m2.5:cloud", "qwen3-coder-next:cloud"];
 pub const CATALOG_URL: &str = "https://ollama.com/api/tags";
 
-/// Models empirically verified to respond on the free plan (scanned 2026-06-13).
-/// Used by the model picker to label tiers; anything not listed here and not
-/// learned as subscription-gated at runtime is shown as "unknown".
-pub const VERIFIED_FREE: [&str; 21] = [
+/// Models empirically verified to respond on the free plan (full catalog scan
+/// 2026-06-13, all 42 cloud models classified). Used by the picker to label
+/// tiers; anything not listed here and not learned at runtime shows "unknown".
+pub const VERIFIED_FREE: [&str; 27] = [
     "qwen3-vl:235b-cloud", "qwen3-vl:235b-instruct-cloud", "qwen3-coder-next:cloud",
     "qwen3-next:80b-cloud", "qwen3-coder:480b-cloud", "minimax-m2.5:cloud", "glm-4.7:cloud",
     "gpt-oss:120b-cloud", "gpt-oss:20b-cloud", "gemma3:4b-cloud", "gemma3:12b-cloud",
     "gemma3:27b-cloud", "gemma4:31b-cloud", "ministral-3:3b-cloud", "ministral-3:8b-cloud",
     "ministral-3:14b-cloud", "devstral-2:123b-cloud", "devstral-small-2:24b-cloud",
     "cogito-2.1:671b-cloud", "nemotron-3-nano:30b-cloud", "rnj-1:8b-cloud",
+    // 2026-06-13 補掃
+    "glm-4.6:cloud", "minimax-m2:cloud", "minimax-m2.1:cloud", "minimax-m3:cloud",
+    "nemotron-3-super:cloud", "nemotron-3-ultra:cloud",
 ];
 
 /// Models empirically verified to be subscription-gated (HTTP 403 "requires a
-/// subscription"; scanned 2026-06-13). The picker labels these "需訂閱" and the
-/// default filter hides them.
-pub const VERIFIED_SUBSCRIPTION: [&str; 7] = [
+/// subscription"; full catalog scan 2026-06-13). The picker labels these
+/// "需訂閱" and the default filter hides them.
+pub const VERIFIED_SUBSCRIPTION: [&str; 15] = [
     "minimax-m2.7:cloud", "qwen3.5:397b-cloud", "deepseek-v3.1:671b-cloud",
     "deepseek-v3.2:cloud", "glm-5:cloud", "kimi-k2:1t-cloud", "mistral-large-3:675b-cloud",
+    // 2026-06-13 補掃
+    "deepseek-v4-flash:cloud", "deepseek-v4-pro:cloud", "gemini-3-flash-preview:cloud",
+    "glm-5.1:cloud", "kimi-k2-thinking:cloud", "kimi-k2.5:cloud", "kimi-k2.6:cloud",
+    "kimi-k2.7-code:cloud",
 ];
 
 /// 特殊哨符:用使用者自己的 Anthropic 帳號直接跑真正的 Claude(不經 Ollama)。
