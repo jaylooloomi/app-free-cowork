@@ -20,7 +20,16 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 pub fn notify(app: &AppHandle, body: &str) {
     use tauri_plugin_notification::NotificationExt;
-    let _ = app.notification().builder().title("Free Claude Code").body(body).show();
+    let mut builder = app.notification().builder().title("Free Claude Code").body(body);
+    // Windows toast 預設只顯示通用 icon;明確指定隨安裝包帶入的 app icon(resource),
+    // 讓通知顯示本 app 的圖示。找不到檔案時就略過(仍會顯示無 icon 的通知)。
+    if let Ok(dir) = app.path().resource_dir() {
+        let icon = dir.join("icons").join("128x128.png");
+        if icon.exists() {
+            builder = builder.icon(icon.to_string_lossy().into_owned());
+        }
+    }
+    let _ = builder.show();
 }
 
 pub fn register_hotkey(app: &AppHandle, hotkey: &str) -> Result<(), String> {
