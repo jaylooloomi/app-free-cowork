@@ -383,6 +383,11 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
     }
     let spec = launcher::build_launch_spec(&task.prompt, &s, &model);
     let is_background = spec.background;
+    // 無腦模式(非謹慎):前景互動啟動前先預先信任工作目錄,免去 Claude Code
+    // 「資料夾信任」確認(背景 -p 模式本來就自動信任)。謹慎模式保留該確認當把關。
+    if !s.cautious_mode && !is_background {
+        crate::trust::ensure_trusted(&spec.cwd);
+    }
     let dir = logging::logs_dir();
     logging::rotate(&dir, 30);
     let log = logging::new_run_log(&dir).map_err(|e| format!("無法建立記錄檔:{e}"))?;

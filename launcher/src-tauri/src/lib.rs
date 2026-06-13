@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod launcher;
 pub mod logging;
 pub mod settings;
+pub mod trust;
 pub mod version;
 pub mod voice;
 
