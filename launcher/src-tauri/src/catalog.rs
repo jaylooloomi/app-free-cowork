@@ -12,16 +12,23 @@ pub fn parse_cloud_models(api_tags_json: &str) -> Option<Vec<String>> {
         .collect())
 }
 
-/// Free-tier access verified empirically 2026-06-12: minimax-m2.5, qwen3-coder-next
-/// and glm-4.7 respond on the free plan; minimax-m2.7 is subscription-gated
-/// (HTTP 403 "this model requires a subscription") — never default to it.
-pub const FALLBACKS: [&str; 2] = ["minimax-m2.5:cloud", "qwen3-coder-next:cloud"];
+/// Fallback chain when the configured model leaves the catalog. Free-tier
+/// access verified empirically (2026-06-12/13). qwen3-vl is vision-capable so
+/// pasted images work; qwen3-coder-next is the lighter agentic specialist.
+/// minimax-m2.7 / qwen3.5 are subscription-gated (HTTP 403) — never default to them.
+pub const FALLBACKS: [&str; 2] = ["qwen3-vl:235b-cloud", "qwen3-coder-next:cloud"];
 pub const CATALOG_URL: &str = "https://ollama.com/api/tags";
 
-/// Models empirically verified to respond on the free plan (2026-06-12).
+/// Models empirically verified to respond on the free plan (2026-06-12/13).
 /// Used by the model picker to label tiers; anything not listed here and not
 /// learned as subscription-gated at runtime is shown as "unknown".
-pub const VERIFIED_FREE: [&str; 3] = ["minimax-m2.5:cloud", "qwen3-coder-next:cloud", "glm-4.7:cloud"];
+pub const VERIFIED_FREE: [&str; 5] = [
+    "qwen3-vl:235b-cloud",
+    "qwen3-coder-next:cloud",
+    "qwen3-next:80b-cloud",
+    "minimax-m2.5:cloud",
+    "glm-4.7:cloud",
+];
 
 /// 回傳 (要用的模型, 若有改動的中文通知)。catalog 為空(離線/未取得)時不改動。
 pub fn choose_model(configured: &str, catalog: &[String]) -> (String, Option<String>) {
@@ -55,8 +62,9 @@ mod tests {
         let cat: Vec<String> = vec!["minimax-m2.5:cloud".into(), "qwen3-coder-next:cloud".into(), "glm-5:cloud".into()];
         let (m, notice) = choose_model("minimax-m2.5:cloud", &cat);
         assert_eq!(m, "minimax-m2.5:cloud"); assert!(notice.is_none());
+        // FALLBACKS[0] (qwen3-vl) not in this catalog → falls to FALLBACKS[1] qwen3-coder-next
         let (m, notice) = choose_model("dead-model:cloud", &cat);
-        assert_eq!(m, "minimax-m2.5:cloud"); assert!(notice.is_some());
+        assert_eq!(m, "qwen3-coder-next:cloud"); assert!(notice.is_some());
         let cat2: Vec<String> = vec!["glm-5:cloud".into()];
         let (m, notice) = choose_model("dead-model:cloud", &cat2);
         assert_eq!(m, "glm-5:cloud"); assert!(notice.is_some());
