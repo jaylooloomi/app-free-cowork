@@ -6,7 +6,7 @@
 
 **Press `Alt+H` · say what you need · it gets done — free, no API key, zero config.**
 
-[![Release](https://img.shields.io/github/v/release/jaylooloomi/FreeCowork?label=download&style=flat-square)](https://github.com/jaylooloomi/FreeCowork/releases/latest)
+[![Release](https://img.shields.io/github/v/release/jaylooloomi/free-cowork?label=download&style=flat-square)](https://github.com/jaylooloomi/free-cowork/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)](#system-requirements)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB?style=flat-square)](https://tauri.app)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](#license)
@@ -105,11 +105,11 @@ On first run the app silently installs **Ollama** and **Claude Code** (no admin 
 > **First-time note:** the installer isn't code-signed yet, so Windows SmartScreen may warn you → click **More info → Run anyway**.
 
 **1. Download the installer (easiest)**
-Grab the latest `*-setup.exe` from the [Releases page](https://github.com/jaylooloomi/FreeCowork/releases/latest) and double-click (no admin needed).
+Grab the latest `*-setup.exe` from the [Releases page](https://github.com/jaylooloomi/free-cowork/releases/latest) and double-click (no admin needed).
 
 **2. One-line install (PowerShell)**
 ```powershell
-irm https://raw.githubusercontent.com/jaylooloomi/FreeCowork/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/jaylooloomi/free-cowork/main/install.ps1 | iex
 ```
 
 **3. winget** *(planned)*

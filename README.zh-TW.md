@@ -6,7 +6,7 @@
 
 **按 `Alt+H` · 說出你要什麼 · 它幫你做完 —— 免費、免 API key、零設定。**
 
-[![Release](https://img.shields.io/github/v/release/jaylooloomi/FreeCowork?label=download&style=flat-square)](https://github.com/jaylooloomi/FreeCowork/releases/latest)
+[![Release](https://img.shields.io/github/v/release/jaylooloomi/free-cowork?label=download&style=flat-square)](https://github.com/jaylooloomi/free-cowork/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?style=flat-square)](#系統需求)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB?style=flat-square)](https://tauri.app)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](#授權)
@@ -105,11 +105,11 @@ Alt+H  →  「幫我把桌面依檔案類型整理成資料夾」  →  Enter
 > **首次提醒:** 安裝包尚未做程式碼簽章,Windows SmartScreen 可能會警告 → 點「**更多資訊 → 仍要執行**」。
 
 **1. 直接下載安裝檔(最簡單)**
-到 [Releases 頁面](https://github.com/jaylooloomi/FreeCowork/releases/latest) 下載最新的 `*-setup.exe`,雙擊執行(免系統管理員)。
+到 [Releases 頁面](https://github.com/jaylooloomi/free-cowork/releases/latest) 下載最新的 `*-setup.exe`,雙擊執行(免系統管理員)。
 
 **2. 一行指令安裝(PowerShell)**
 ```powershell
-irm https://raw.githubusercontent.com/jaylooloomi/FreeCowork/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/jaylooloomi/free-cowork/main/install.ps1 | iex
 ```
 
 **3. winget** *(規劃中)*
