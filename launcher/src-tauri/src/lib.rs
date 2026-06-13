@@ -4,6 +4,7 @@ pub mod command;
 pub mod doctor;
 pub mod fx;
 pub mod http;
+pub mod i18n;
 pub mod ipc;
 pub mod launcher;
 pub mod logging;

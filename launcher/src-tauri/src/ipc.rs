@@ -134,6 +134,7 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
         let mut s = state.settings.lock().unwrap();
         let merged = overlay_ui_fields(&s, &new_settings);
         settings::save(&settings::settings_path(), &merged).map_err(|e| e.to_string())?;
+        crate::i18n::set_locale(&merged.locale);
         *s = merged;
     }
 
@@ -145,6 +146,7 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
 #[tauri::command]
 pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<StatusDto, String> {
     let s = state.settings.lock().unwrap().clone();
+    crate::i18n::set_locale(&s.locale);
 
     // claude(Anthropic 帳號)路徑:完全不碰 Ollama,只看 claude.exe 是否安裝。
     if s.model == catalog::CLAUDE_MODEL {
@@ -157,11 +159,9 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
         .map_err(|e| e.to_string())?;
         let (state_str, detail) = match claude_status {
             (doctor::Status::Ready, true) => ("ready", String::new()),
-            (doctor::Status::Ready, false) => {
-                ("ready", "尚未登入 Anthropic — 首次執行會在終端機要求 /login".to_string())
-            }
+            (doctor::Status::Ready, false) => ("ready", crate::i18n::claude_not_logged_in()),
             (doctor::Status::Degraded { reason }, _) => ("degraded", reason),
-            _ => ("degraded", "Claude 狀態未知".to_string()),
+            _ => ("degraded", crate::i18n::claude_status_unknown()),
         };
         return Ok(StatusDto {
             state: state_str.into(),
@@ -207,7 +207,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
                 return Ok(StatusDto {
                     state: "offline".into(),
                     model,
-                    detail: "離線 — 雲端模型需要網路連線".into(),
+                    detail: crate::i18n::offline_cloud_needs_network(),
                     plan,
                 });
             }
@@ -225,7 +225,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
         doctor::Status::NeedsSetup { .. } => StatusDto {
             state: "needs_setup".into(),
             model,
-            detail: "首次使用將自動安裝必要元件".into(),
+            detail: crate::i18n::first_run_will_install(),
             plan,
         },
         doctor::Status::Degraded { reason } => StatusDto { state: "degraded".into(), model, detail: reason, plan },
@@ -264,12 +264,13 @@ pub fn save_pasted_image(data: Vec<u8>, ext: String) -> Result<String, String> {
 #[tauri::command]
 pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: String) -> Result<String, String> {
     let prompt = prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err("請輸入需求".into());
-    }
     let (signin_no, is_claude);
     {
         let mut s = state.settings.lock().unwrap();
+        crate::i18n::set_locale(&s.locale);
+        if prompt.is_empty() {
+            return Err(crate::i18n::empty_prompt());
+        }
         s.push_history(&prompt);
         let _ = settings::save(&settings::settings_path(), &s);
         signin_no = s.signin_state == SigninState::No;
@@ -401,7 +402,7 @@ pub fn start_or_queue_next(app: &AppHandle) {
     let next = take_next(&state);
     emit_queue_changed(app);
     if let Some(task) = next {
-        crate::notify(app, &format!("開始執行:{}…", prompt_preview(&task.prompt)));
+        crate::notify(app, &crate::i18n::task_starting(&prompt_preview(&task.prompt)));
         if let Err(e) = do_launch(app, task) {
             crate::notify(app, &e);
         }
@@ -438,7 +439,7 @@ pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
             let next = pop_and_reserve_next(&mut state.queue.lock().unwrap());
             emit_queue_changed(app);
             if let Some(next_task) = next {
-                crate::notify(app, &format!("開始執行:{}…", prompt_preview(&next_task.prompt)));
+                crate::notify(app, &crate::i18n::task_starting(&prompt_preview(&next_task.prompt)));
                 if let Err(chain_err) = do_launch(app, next_task) {
                     crate::notify(app, &chain_err);
                 }
@@ -466,7 +467,7 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
     }
     let dir = logging::logs_dir();
     logging::rotate(&dir, 30);
-    let log = logging::new_run_log(&dir).map_err(|e| format!("無法建立記錄檔:{e}"))?;
+    let log = logging::new_run_log(&dir).map_err(|e| crate::i18n::log_create_failed(&e.to_string()))?;
     let app2 = app.clone();
     // 兩種模式 waiter 都會呼叫(spawn v1.1 契約):先處理通知,再接續佇列。
     let on_done: launcher::OnDone = Box::new(move |code, log_path, elapsed| {
@@ -477,7 +478,7 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
         // 持鎖橫跨 spawn → 補 pid:waiter(handle_task_exit/start_or_queue_next)
         // 第一步就鎖 queue,因此「極速結束」也不會在 pid 寫入前清掉預約。
         let mut q = state.queue.lock().unwrap();
-        let pid = launcher::spawn(&spec, log, Some(on_done)).map_err(|e| format!("啟動失敗:{e}"))?;
+        let pid = launcher::spawn(&spec, log, Some(on_done)).map_err(|e| crate::i18n::launch_failed(&e.to_string()))?;
         if let Some(rt) = q.running.as_mut().filter(|rt| rt.id == task.id) {
             rt.pid = Some(pid);
             rt.background = is_background;
@@ -509,7 +510,7 @@ fn handle_task_exit(
     // M3:taskkill 的退出碼會被分類成「任務失敗」— 使用者主動停止不是失敗。
     // 佇列接續由呼叫端(start_or_queue_next)照常進行。
     if task_was_stopping(&app.state::<AppState>()) {
-        crate::notify(app, "已停止任務");
+        crate::notify(app, &crate::i18n::task_stopped());
         return;
     }
     if code == 0 {
@@ -526,7 +527,7 @@ fn handle_task_exit(
             }
         }
         if is_background {
-            crate::notify(app, "任務完成");
+            crate::notify(app, &crate::i18n::task_done());
         }
         return;
     }
@@ -537,8 +538,7 @@ fn handle_task_exit(
     let tail = read_log_tail(log_path);
     if !is_background && tail.is_empty() {
         // 前景 fast-fail 且無記錄輸出 — 可能是訂閱/額度/登入問題
-        let msg = format!("啟動後立即失敗 (exit {code}),可能是模型需訂閱、額度用盡或登入失效");
-        crate::notify(app, &msg);
+        crate::notify(app, &crate::i18n::fast_fail(code));
         return;
     }
     match launcher::classify_failure(&tail) {
@@ -552,10 +552,10 @@ fn handle_task_exit(
                     let _ = settings::save(&settings::settings_path(), &st);
                 }
             }
-            crate::notify(app, "此模型需要付費訂閱 — 請到設定改用免費模型(如 minimax-m2.5:cloud)");
+            crate::notify(app, &crate::i18n::subscription_required());
         }
         launcher::FailureKind::Quota => {
-            crate::notify(app, "免費額度已用完,稍後重置(限制綁帳號,換模型無效)");
+            crate::notify(app, &crate::i18n::quota_exhausted());
         }
         launcher::FailureKind::Auth => {
             // Re-lock sign-in state so next submit_prompt triggers the wizard
@@ -565,13 +565,14 @@ fn handle_task_exit(
                 st.signin_state = SigninState::No;
                 let _ = settings::save(&settings::settings_path(), &st);
             }
-            crate::notify(app, "需要重新登入 ollama.com,下次啟動會自動引導");
+            crate::notify(app, &crate::i18n::need_relogin());
         }
         launcher::FailureKind::Other => {
+            let log_str = log_path.display().to_string();
             let msg = if code == -1 {
-                format!("任務異常結束(原因未知),記錄:{}", log_path.display())
+                crate::i18n::task_crashed(&log_str)
             } else {
-                format!("任務失敗 (exit {code}),記錄:{}", log_path.display())
+                crate::i18n::task_failed(code, &log_str)
             };
             crate::notify(app, &msg);
         }
@@ -627,7 +628,11 @@ pub async fn wizard_plan(state: State<'_, AppState>) -> Result<WizardPlan, Strin
 
 #[tauri::command]
 pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<bootstrap::StepResult, String> {
-    let model = state.settings.lock().unwrap().model.clone();
+    let model = {
+        let s = state.settings.lock().unwrap();
+        crate::i18n::set_locale(&s.locale);
+        s.model.clone()
+    };
     let step2 = step.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let runner = SystemRunner;
@@ -639,14 +644,14 @@ pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<boot
             // (200ms × 50 = wait up to 10s, same as prod_deps).
             "signin" | "model" => {
                 if !doctor::ensure_server(&runner, &http, 200, 50, &SERVE_SPAWN_GATE) {
-                    bootstrap::StepResult { ok: false, detail: "Ollama 服務尚未就緒,請重試".into() }
+                    bootstrap::StepResult { ok: false, detail: crate::i18n::ollama_not_ready() }
                 } else if step2 == "signin" {
                     bootstrap::signin(&runner)
                 } else {
                     bootstrap::register_model(&runner, &model)
                 }
             }
-            other => bootstrap::StepResult { ok: false, detail: format!("未知步驟 {other}") },
+            other => bootstrap::StepResult { ok: false, detail: crate::i18n::unknown_step(other) },
         }
     })
     .await
@@ -721,7 +726,7 @@ fn cancel_in_queue(state: &AppState, id: u64) -> bool {
 #[tauri::command]
 pub fn queue_cancel(state: State<AppState>, app: AppHandle, id: u64) -> Result<(), String> {
     if !cancel_in_queue(&state, id) {
-        return Err("佇列中找不到該任務".into());
+        return Err(crate::i18n::task_not_in_queue());
     }
     emit_queue_changed(&app);
     Ok(())
@@ -732,15 +737,15 @@ pub fn queue_cancel(state: State<AppState>, app: AppHandle, id: u64) -> Result<(
 /// (id, pid) 供鎖外 taskkill。讀 pid 與標記之間沒有空窗,不會殺錯任務。
 fn mark_stopping(q: &mut QueueState, expected_id: Option<u64>) -> Result<(u64, u32), String> {
     let Some(rt) = q.running.as_mut() else {
-        return Err("目前沒有執行中的任務".into());
+        return Err(crate::i18n::no_running_task());
     };
     if expected_id.is_some_and(|id| id != rt.id) {
-        return Err("任務已結束".into());
+        return Err(crate::i18n::task_already_ended());
     }
     if !rt.background {
-        return Err("前景任務請直接關閉其終端機視窗".into());
+        return Err(crate::i18n::foreground_close_terminal());
     }
-    let pid = rt.pid.ok_or_else(|| "無法取得任務的處理程序 ID".to_string())?;
+    let pid = rt.pid.ok_or_else(crate::i18n::no_task_pid)?;
     rt.stopping = true;
     Ok((rt.id, pid))
 }
@@ -833,7 +838,7 @@ pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
 pub async fn set_model(_app: AppHandle, state: State<'_, AppState>, name: String) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
-        return Err("模型名稱不可為空".into());
+        return Err(crate::i18n::empty_model_name());
     }
     let mut s = state.settings.lock().unwrap();
     s.model = name;
@@ -932,7 +937,7 @@ pub async fn scan_models(app: AppHandle, state: State<'_, AppState>) -> Result<S
             let tier = classify_probe(status);
             // 第一個就連不上 → Ollama 多半沒開,直接中止(不寫入任何 broken)
             if is_transport_err && out.is_empty() {
-                return Err("Ollama 服務未回應,請先確認 Ollama 已啟動後再掃描".to_string());
+                return Err(crate::i18n::ollama_not_responding_for_scan());
             }
             // 連線錯誤(None)= 測不到,跳過不寫入;只有確定的 HTTP 結果才記錄
             if let Some(tier) = tier {
@@ -1009,7 +1014,7 @@ fn url_allowed(url: &str) -> bool {
 #[tauri::command]
 pub fn open_url(url: String) -> Result<(), String> {
     if !url_allowed(&url) {
-        return Err("不允許開啟此網址".into());
+        return Err(crate::i18n::url_not_allowed());
     }
     use crate::command::Runner as _;
     SystemRunner.spawn_detached("explorer", &[&url]).map_err(|e| e.to_string())
@@ -1081,10 +1086,10 @@ pub fn refresh_plan(app: AppHandle) {
 pub async fn start_voice_input(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let Some(w) = app.get_webview_window("palette") else {
-            return Err("找不到輸入面板視窗".to_string());
+            return Err(crate::i18n::palette_window_not_found());
         };
         let _ = w.show();
-        w.set_focus().map_err(|_| "無法聚焦輸入面板".to_string())?;
+        w.set_focus().map_err(|_| crate::i18n::palette_focus_failed())?;
         // 50ms 延遲讓焦點切換先完成,語音輸入才會落在面板的輸入框
         std::thread::sleep(std::time::Duration::from_millis(50));
         if let Err(e) = crate::voice::trigger_voice_typing() {
@@ -1266,6 +1271,9 @@ mod tests {
 
     #[test]
     fn mark_stopping_rules_and_sets_flag_in_same_acquisition() {
+        // 這些斷言比對的是經 i18n(預設繁中)產生的字串;固定語系避免與
+        // i18n 測試在同一 process 平行設定 en 時互相干擾。
+        crate::i18n::set_locale("zh-TW");
         let mut q = QueueState::default();
         assert!(mark_stopping(&mut q, None).is_err(), "沒有執行中任務不能停止");
         q.running = Some(running_task(1, false, Some(10)));
@@ -1281,6 +1289,7 @@ mod tests {
     /// M4:任務已換手(running.id != 預期 id)→ 不可殺到接續的新任務。
     #[test]
     fn mark_stopping_rejects_stale_task_id() {
+        crate::i18n::set_locale("zh-TW");
         let mut q = QueueState { running: Some(running_task(7, true, Some(111))), ..Default::default() };
         assert_eq!(mark_stopping(&mut q, Some(6)).unwrap_err(), "任務已結束");
         assert!(!q.running.as_ref().unwrap().stopping, "換手時不得標記新任務");

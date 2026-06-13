@@ -1,8 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { api, type StepResult } from "./api";
-  import { S } from "./strings";
+  import { api, type StepResult, type Settings } from "./api";
+  import { strings } from "./strings";
+
+  // 介面語言以 settings.locale 為準;尚未取得設定前退回 zh-TW。
+  let settings = $state<Settings | null>(null);
+  const S = $derived(strings(settings?.locale ?? "zh-TW"));
+
+  async function loadLocale() {
+    try {
+      settings = await api.getSettings();
+    } catch {
+      // 取得失敗時保留上次成功值;從未成功時走 zh-TW fallback
+    }
+  }
 
   type Row = { step: string; state: "pending" | "running" | "ok" | "fail"; detail: string };
   let rows: Row[] = $state([]);
@@ -41,8 +53,11 @@
   }
 
   onMount(() => {
+    loadLocale();
     // 視窗啟動時皆為隱藏狀態,不可自動安裝 — 等後端真正顯示時才初始化
     const unlisten = listen("wizard-shown", () => {
+      // 每次顯示重新取得語言,語言改動後再開啟即套用
+      loadLocale();
       // 閒置(尚未開始/已完成/全部成功)→ 重新取得計畫;進行中則保留進度
       if (rows.length === 0 || done || rows.every((r) => r.state === "ok")) {
         init();

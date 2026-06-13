@@ -2,9 +2,11 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { api, type Settings } from "./api";
-  import { S } from "./strings";
+  import { strings } from "./strings";
 
-  let s: Settings | null = $state(null);
+  let s = $state<Settings | null>(null);
+  // 語言選擇器綁定 s.locale;S 為 $derived,改選語言後本視窗的標籤立即以新語言重繪。
+  const S = $derived(strings(s?.locale ?? "zh-TW"));
   let models: string[] = $state([]);
   let saved = $state(false);
   let error = $state("");
@@ -48,6 +50,7 @@
         background_mode: snap.background_mode,
         working_dir: snap.working_dir,
         autostart: snap.autostart,
+        locale: snap.locale,
       };
       // 失敗(例:快捷鍵註冊失敗)→ 後端已回滾,顯示訊息,欄位保持可編輯重試
       await api.saveSettings(merged);
@@ -71,6 +74,13 @@
 {#if s}
   <main class="settings">
     <h1>{S.settingsTitle}</h1>
+    <label
+      >{S.settingsLanguage}
+      <select bind:value={s.locale}>
+        <option value="zh-TW">繁體中文</option>
+        <option value="en">English</option>
+      </select></label
+    >
     <label
       >{S.settingsHotkey}
       <input bind:value={s.hotkey} placeholder={S.settingsHotkeyPlaceholder} />

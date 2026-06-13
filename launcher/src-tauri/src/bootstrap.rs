@@ -11,16 +11,16 @@ pub struct StepResult {
 
 fn result(r: std::io::Result<CmdOutput>, action: &str) -> StepResult {
     match r {
-        Ok(o) if o.ok() => StepResult { ok: true, detail: format!("{action} 完成") },
+        Ok(o) if o.ok() => StepResult { ok: true, detail: crate::i18n::step_ok(action) },
         Ok(o) => {
             // Use stdout as fallback when stderr is empty (some tools write only to stdout)
             let tail = if o.stderr.trim().is_empty() { &o.stdout } else { &o.stderr };
             StepResult {
                 ok: false,
-                detail: format!("{action} 失敗 (exit {}): {}", o.code, truncate(tail, 400)),
+                detail: crate::i18n::step_failed_with_tail(action, o.code, &truncate(tail, 400)),
             }
         }
-        Err(e) => StepResult { ok: false, detail: format!("{action} 失敗: {e}") },
+        Err(e) => StepResult { ok: false, detail: crate::i18n::step_failed_err(action, &e.to_string()) },
     }
 }
 
@@ -76,11 +76,11 @@ pub fn install_ollama(runner: &dyn Runner, http: &dyn Http, temp_dir: PathBuf) -
         match &r {
             Ok(o) if o.ok() => {
                 refresh_path();
-                return StepResult { ok: true, detail: "安裝 Ollama (winget) 完成".into() };
+                return StepResult { ok: true, detail: crate::i18n::step_ok(&crate::i18n::action_install_ollama_winget()) };
             }
             Ok(o) if o.code == WINGET_ALREADY_INSTALLED => {
                 refresh_path();
-                return StepResult { ok: true, detail: "安裝 Ollama (winget) 完成".into() };
+                return StepResult { ok: true, detail: crate::i18n::step_ok(&crate::i18n::action_install_ollama_winget()) };
             }
             Ok(o) => {
                 // Winget ran but failed — record cause for potential fallback error message
@@ -88,7 +88,7 @@ pub fn install_ollama(runner: &dyn Runner, http: &dyn Http, temp_dir: PathBuf) -
                 winget_note = Some(format!("winget exit {}: {}", o.code, truncate(tail, 120)));
             }
             Err(e) => {
-                winget_note = Some(format!("winget 執行失敗: {e}"));
+                winget_note = Some(crate::i18n::winget_run_failed(&e.to_string()));
             }
         }
     }
@@ -100,7 +100,7 @@ pub fn install_ollama(runner: &dyn Runner, http: &dyn Http, temp_dir: PathBuf) -
     let fallback_result = match http.download_to_file(OLLAMA_SETUP_URL, &exe, Duration::from_secs(3600)) {
         Err(e) => StepResult {
             ok: false,
-            detail: format!("下載 OllamaSetup.exe 失敗: {e}"),
+            detail: crate::i18n::download_setup_failed(&e.to_string()),
         },
         Ok(()) => {
             let r = runner.run(
@@ -113,7 +113,7 @@ pub fn install_ollama(runner: &dyn Runner, http: &dyn Http, temp_dir: PathBuf) -
             if r.as_ref().map(|o| o.ok()).unwrap_or(false) {
                 refresh_path();
             }
-            result(r, "安裝 Ollama (直接下載)")
+            result(r, &crate::i18n::action_install_ollama_direct())
         }
     };
 
@@ -122,7 +122,7 @@ pub fn install_ollama(runner: &dyn Runner, http: &dyn Http, temp_dir: PathBuf) -
         if let Some(note) = winget_note {
             return StepResult {
                 ok: false,
-                detail: format!("{}(先前 {})", fallback_result.detail, note),
+                detail: crate::i18n::fallback_with_prior(&fallback_result.detail, &note),
             };
         }
     }
@@ -142,7 +142,7 @@ pub fn install_claude(runner: &dyn Runner) -> StepResult {
         LONG,
     );
     refresh_path();
-    result(r, "安裝 Claude Code")
+    result(r, &crate::i18n::action_install_claude())
 }
 
 static SIGNIN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -153,16 +153,16 @@ pub fn signin(runner: &dyn Runner) -> StepResult {
     let Ok(_g) = SIGNIN_GUARD.try_lock() else {
         return StepResult {
             ok: false,
-            detail: "登入流程已在進行中,請先完成瀏覽器配對".into(),
+            detail: crate::i18n::signin_in_progress(),
         };
     };
-    result(runner.run("ollama", &["signin"], Duration::from_secs(600)), "登入 ollama.com")
+    result(runner.run("ollama", &["signin"], Duration::from_secs(600)), &crate::i18n::action_signin())
 }
 
 pub fn register_model(runner: &dyn Runner, model: &str) -> StepResult {
     result(
         runner.run("ollama", &["pull", model], Duration::from_secs(300)),
-        "註冊雲端模型",
+        &crate::i18n::action_register_model(),
     )
 }
 
@@ -294,6 +294,8 @@ mod tests {
 
     #[test]
     fn signin_guard_rejects_concurrent_call() {
+        // detail 經 i18n(預設繁中)產生;固定語系避免與 i18n 測試平行設定 en 干擾。
+        crate::i18n::set_locale("zh-TW");
         // Hold the mutex to simulate an in-progress signin
         let _held = SIGNIN_GUARD.lock().unwrap();
         let r = MockRunner::default().on("ollama signin", 0, "");

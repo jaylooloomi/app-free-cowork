@@ -1,4 +1,4 @@
-export const S = {
+const zhTW = {
   placeholder: "想要我做什麼?(例:幫我整理桌面,並且建立資料夾分類)",
   statusReady: (model: string) => `就緒 · ${model}`,
   statusNeedsSetup: "首次使用:送出後將自動安裝必要元件",
@@ -18,6 +18,7 @@ export const S = {
     model: "註冊雲端模型",
   } as Record<string, string>,
   settingsTitle: "設定",
+  settingsLanguage: "語言",
   settingsHotkey: "快捷鍵",
   settingsHotkeyPlaceholder: "Alt+H",
   settingsHotkeyHint: "格式如 Alt+H、Ctrl+Alt+Space。注意:Alt+H 與 Office 功能區快速鍵衝突。",
@@ -57,3 +58,73 @@ export const S = {
   attachRemoveTip: "移除這張圖片",
   attachHint: "圖片需搭配支援視覺的模型(如 qwen3-vl:235b-cloud)",
 };
+
+export type Strings = typeof zhTW;
+
+const en = {
+  placeholder: "What can I do for you? (e.g. organize my desktop into folders)",
+  statusReady: (model: string) => `Ready · ${model}`,
+  statusNeedsSetup: "First run: required components install automatically after you submit",
+  statusDegraded: (d: string) => `Note: ${d}`,
+  wizardTitle: "First-time setup",
+  wizardHint: "The following components install automatically (no administrator rights needed)",
+  wizardSignin: "Open browser to sign in",
+  wizardRetry: "Retry failed step",
+  wizardInitRetry: "Retry",
+  wizardDisclaimer:
+    "By default this tool lets the AI run file operations directly — without per-step confirmation, and it automatically trusts the working directory. To review each step, enable “Cautious mode” in Settings.",
+  wizardStart: "Get started",
+  wizardStepLabels: {
+    ollama: "Install Ollama (about 1.3GB, may take 10+ minutes depending on connection)",
+    ollama_upgrade: "Upgrade Ollama",
+    claude: "Install Claude Code",
+    signin: "Sign in to ollama.com",
+    model: "Register cloud model",
+  } as Record<string, string>,
+  settingsTitle: "Settings",
+  settingsLanguage: "Language",
+  settingsHotkey: "Hotkey",
+  settingsHotkeyPlaceholder: "Alt+H",
+  settingsHotkeyHint:
+    "Format like Alt+H or Ctrl+Alt+Space. Note: Alt+H conflicts with the Office ribbon shortcut.",
+  settingsModel: "Model",
+  settingsCautious: "Cautious mode (ask before risky actions, instead of full automation)",
+  settingsBackground: "Background mode (no terminal window, notify when done)",
+  settingsWorkingDir: "Working directory",
+  settingsWorkingDirPlaceholder: "Leave empty = your user folder",
+  settingsAutostart: "Launch at startup",
+  settingsSave: "Save",
+  settingsSaved: "Saved ✓",
+  settingsOpenLogs: "Open logs folder",
+  // ---------- v1.1 ----------
+  queueRunning: "Running",
+  queueQueued: "Queued",
+  queueStop: "Stop",
+  queueCancelTip: "Cancel this task",
+  queuedToast: "Added to queue",
+  tierFree: "Free",
+  tierSubscription: "Subscription",
+  tierUnknown: "Unknown",
+  tierAnthropic: "Your Claude account",
+  tierBroken: "Unavailable",
+  tierIncompatible: "Unsupported",
+  modelScan: "🔍 Check availability",
+  modelScanning: (d: number, t: number) => `Checking ${d}/${t}…`,
+  modelScanDone: (s: { free: number; subscription: number; broken: number; scanned: number; skipped: number }) =>
+    `Check complete: ${s.free} free · ${s.subscription} subscription · ${s.broken} unavailable (${s.scanned} tested)`,
+  modelShowAll: "Show all",
+  modelOnlyUsable: "By default only usable models are shown (your Claude account + free)",
+  planFree: "Free plan",
+  planPro: "Pro",
+  planMax: "Max",
+  planTooltip: "View usage and reset time",
+  micTooltip: () => `Voice input (speech to text)`,
+  voiceHint: "Voice input is active — start speaking",
+  attachRemoveTip: "Remove this image",
+  attachHint: "Images require a vision-capable model (e.g. qwen3-vl:235b-cloud)",
+} satisfies Strings;
+
+/** Return the active string table for the given locale. Defaults to zh-TW. */
+export function strings(locale: string): Strings {
+  return locale === "en" ? en : zhTW;
+}

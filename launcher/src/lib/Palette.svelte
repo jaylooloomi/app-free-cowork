@@ -3,11 +3,14 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { api, type StatusDto, type QueueDto, type ModelEntry, type Settings } from "./api";
-  import { S } from "./strings";
+  import { strings } from "./strings";
 
   let input = $state("");
   let status = $state<StatusDto | null>(null);
   let settings = $state<Settings | null>(null);
+  // 介面語言以 settings.locale 為準;尚未取得設定前退回 zh-TW。
+  // S 為 $derived,locale 變動(下次開啟面板重新 refresh)時整個面板會以新語言重繪。
+  const S = $derived(strings(settings?.locale ?? "zh-TW"));
   let error = $state("");
   let busy = $state(false);
   let history: string[] = $state([]);
@@ -362,14 +365,14 @@
             : status.plan,
   );
 
-  const tierLabels: Record<ModelEntry["tier"], string> = {
+  const tierLabels: Record<ModelEntry["tier"], string> = $derived({
     free: S.tierFree,
     subscription: S.tierSubscription,
     unknown: S.tierUnknown,
     anthropic: S.tierAnthropic,
     broken: S.tierBroken,
     incompatible: S.tierIncompatible,
-  };
+  });
 
   // ✓ 以設定檔的 model 為準(offline 時 status.model 可能不可靠),退回 status?.model
   const currentModel = $derived(settings?.model || status?.model);
@@ -389,7 +392,7 @@
 
   const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
 
-  const micTip = S.micTooltip();
+  const micTip = $derived(S.micTooltip());
 </script>
 
 <svelte:window onkeydown={onGlobalKey} />
