@@ -106,6 +106,7 @@ fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
         working_dir: incoming.working_dir.clone(),
         autostart: incoming.autostart,
         locale: incoming.locale.clone(),
+        voice_hotkey: incoming.voice_hotkey.clone(),
         system_prompt: incoming.system_prompt.clone(),
         history: current.history.clone(),
         signin_state: current.signin_state.clone(),
@@ -1382,6 +1383,7 @@ mod tests {
             working_dir: r"C:\work".into(),
             autostart: false,
             locale: "en".into(),
+            voice_hotkey: "Ctrl+Shift+M".into(),
             system_prompt: "自訂個性".into(),
             // 前端的舊快照 — 必須被忽略
             history: vec!["stale".into()],
@@ -1398,6 +1400,7 @@ mod tests {
         assert_eq!(merged.working_dir, r"C:\work");
         assert!(!merged.autostart);
         assert_eq!(merged.locale, "en", "locale 屬 UI 欄位,以 incoming 為準");
+        assert_eq!(merged.voice_hotkey, "Ctrl+Shift+M", "voice_hotkey 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.system_prompt, "自訂個性", "system_prompt 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.history, vec!["真實歷史".to_string()], "history 以記憶體為準");
         assert_eq!(merged.signin_state, SigninState::Yes, "signin_state 以記憶體為準");

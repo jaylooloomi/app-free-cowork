@@ -14,6 +14,8 @@ export interface Settings {
   known_broken_models?: string[];
   /** 介面語言 */
   locale: "zh-TW" | "en";
+  /** 面板開著時啟動語音輸入的快捷鍵(預設 "Alt+J") */
+  voice_hotkey: string;
   /** 自訂助手個性系統提示;留空 = 內建預設 */
   system_prompt: string;
 }

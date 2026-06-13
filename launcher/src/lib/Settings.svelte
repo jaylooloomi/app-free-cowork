@@ -45,6 +45,7 @@
       const merged = {
         ...fresh,
         hotkey: snap.hotkey,
+        voice_hotkey: snap.voice_hotkey,
         model: snap.model,
         cautious_mode: snap.cautious_mode,
         background_mode: snap.background_mode,
@@ -86,6 +87,11 @@
       >{S.settingsHotkey}
       <input bind:value={s.hotkey} placeholder={S.settingsHotkeyPlaceholder} />
       <small>{S.settingsHotkeyHint}</small></label
+    >
+    <label
+      >{S.settingsVoiceHotkey}
+      <input bind:value={s.voice_hotkey} placeholder={S.settingsVoiceHotkeyPlaceholder} />
+      <small>{S.settingsVoiceHotkeyHint}</small></label
     >
     <label
       >{S.settingsModel}

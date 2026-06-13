@@ -25,6 +25,9 @@ pub struct Settings {
     pub known_broken_models: Vec<String>,
     /// 介面語言:"zh-TW"(預設)或 "en"。前端 UI 與後端通知/錯誤訊息都依此切換。
     pub locale: String,
+    /// 面板開著時啟動語音輸入的快捷鍵(預設 "Alt+J")。這是面板內的鍵,不註冊為
+    /// 全域熱鍵;前端解析此字串(如 "Alt+J"、"Ctrl+Shift+M")比對 keydown。
+    pub voice_hotkey: String,
     /// 自訂「助手個性」系統提示;留空 = 使用內建的「動手型助手」預設(依語言)。
     /// 進階使用者可改寫,改變 AI 的行事風格。
     pub system_prompt: String,
@@ -44,6 +47,7 @@ impl Default for Settings {
             known_free_models: Vec::new(),
             known_broken_models: Vec::new(),
             locale: "zh-TW".into(),
+            voice_hotkey: "Alt+J".into(),
             system_prompt: String::new(),
         }
     }
@@ -106,6 +110,7 @@ mod tests {
     fn defaults_are_per_spec() {
         let s = Settings::default();
         assert_eq!(s.hotkey, "Alt+H");
+        assert_eq!(s.voice_hotkey, "Alt+J");
         assert_eq!(s.model, "minimax-m2.5:cloud");
         assert!(!s.cautious_mode);
         assert!(!s.background_mode);

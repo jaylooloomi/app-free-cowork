@@ -212,11 +212,34 @@
     attachments = attachments.filter((_, idx) => idx !== i);
   }
 
+  // 解析快捷鍵字串(如 "Alt+J"、"Ctrl+Shift+M")並與 keydown 事件比對。
+  // 修飾鍵需完全相符;主鍵比對 e.key(不分大小寫,space 特別處理)。
+  function matchesHotkey(e: KeyboardEvent, combo: string): boolean {
+    const parts = combo
+      .split("+")
+      .map((p) => p.trim().toLowerCase())
+      .filter(Boolean);
+    if (parts.length === 0) return false;
+    const key = parts[parts.length - 1];
+    const mods = parts.slice(0, -1);
+    const wantAlt = mods.includes("alt");
+    const wantCtrl = mods.includes("ctrl") || mods.includes("control");
+    const wantShift = mods.includes("shift");
+    const wantMeta =
+      mods.includes("meta") || mods.includes("win") || mods.includes("cmd") || mods.includes("super");
+    if (e.altKey !== wantAlt || e.ctrlKey !== wantCtrl || e.shiftKey !== wantShift || e.metaKey !== wantMeta) {
+      return false;
+    }
+    const ek = (e.key || "").toLowerCase();
+    if (key === "space") return ek === " ";
+    return ek === key;
+  }
+
   // 全域鍵(svelte:window)— 不管焦點在哪都生效:
-  // Alt+J 啟動語音輸入(面板開著時的專屬語音鍵;Alt+H 仍是開/關面板)。
+  // 語音快捷鍵(預設 Alt+J,可在設定調整)啟動語音輸入;Alt+H 仍是開/關面板。
   // Escape:選單開啟時先關選單,再按一次才隱藏面板。
   function onGlobalKey(e: KeyboardEvent) {
-    if (e.altKey && (e.key === "j" || e.key === "J")) {
+    if (matchesHotkey(e, settings?.voice_hotkey || "Alt+J")) {
       e.preventDefault();
       if (!busy && !offline) onMic();
       return;
@@ -398,7 +421,7 @@
 
   const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
 
-  const micTip = $derived(S.micTooltip());
+  const micTip = $derived(S.micTooltip(settings?.voice_hotkey || "Alt+J"));
 </script>
 
 <svelte:window onkeydown={onGlobalKey} />
