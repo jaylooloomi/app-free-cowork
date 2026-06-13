@@ -7,6 +7,24 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter as _, Manager, State};
 
+/// 中毒容忍的取鎖:某執行緒持鎖時 panic 會讓 Mutex 中毒,之後天真的
+/// `.lock().unwrap()` 會再次 panic。最致命的是 waiter 執行緒的
+/// on_done → start_or_queue_next 路徑 ——
+/// 只要 queue/settings 任一鎖中毒,on_done 就會半途 panic、waiter 執行緒死亡,
+/// start_or_queue_next 永不執行,佇列永遠卡在 'running'(後續任務再也不啟動)。
+/// 這裡的狀態都是單純資料(VecDeque/Settings 等),被中斷的半完成寫入頂多造成
+/// 輕微過期資料,遠優於整個佇列死鎖,故一律 `into_inner` 取回守衛繼續運作。
+/// ipc 內所有狀態鎖一律改用 `lock_safe()`,讓中毒不會在任何地方升級成 panic。
+trait LockExt<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// 佇列中等待執行的任務(記憶體內,不落地)。
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct QueuedTask {
@@ -90,7 +108,7 @@ pub struct StatusDto {
 
 #[tauri::command]
 pub fn get_settings(state: State<AppState>) -> Settings {
-    state.settings.lock().unwrap().clone()
+    state.settings.lock_safe().clone()
 }
 
 /// server-side overlay:以「目前記憶體設定」為底,只接受 UI 可編輯的欄位
@@ -119,7 +137,7 @@ fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_settings: Settings) -> Result<(), String> {
     // (a) Read old settings clone before any mutation
-    let old_settings = state.settings.lock().unwrap().clone();
+    let old_settings = state.settings.lock_safe().clone();
     let hotkey_changed = old_settings.hotkey != new_settings.hotkey;
 
     // (b) If hotkey changed → try register new; on Err → re-register old (best-effort) and return Err
@@ -133,7 +151,7 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
     // (c)+(d) 同一把 settings 鎖內:以當下記憶體值合併(overlay)→ 先落地 →
     // 再提交記憶體;落地失敗回 Err 且不動記憶體(沿用既有順序)
     {
-        let mut s = state.settings.lock().unwrap();
+        let mut s = state.settings.lock_safe();
         let merged = overlay_ui_fields(&s, &new_settings);
         settings::save(&settings::settings_path(), &merged).map_err(|e| e.to_string())?;
         crate::i18n::set_locale(&merged.locale);
@@ -147,7 +165,7 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
 
 #[tauri::command]
 pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<StatusDto, String> {
-    let s = state.settings.lock().unwrap().clone();
+    let s = state.settings.lock_safe().clone();
     crate::i18n::set_locale(&s.locale);
 
     // claude(Anthropic 帳號)路徑:完全不碰 Ollama,只看 claude.exe 是否安裝。
@@ -173,10 +191,10 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
         });
     }
 
-    let cat = state.catalog_cache.lock().unwrap().clone();
+    let cat = state.catalog_cache.lock_safe().clone();
     let cache_empty = cat.is_empty();
     // 帳號方案:回傳快取值;尚未取得時非阻塞地觸發一次抓取(下次輪詢就有)
-    let plan = state.plan.lock().unwrap().clone();
+    let plan = state.plan.lock_safe().clone();
     if plan.is_none() {
         refresh_plan(app.clone());
     }
@@ -215,7 +233,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
             }
             Some(models) => {
                 if !models.is_empty() {
-                    *state.catalog_cache.lock().unwrap() = models.clone();
+                    *state.catalog_cache.lock_safe() = models.clone();
                     cat = models;
                 }
             }
@@ -242,7 +260,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
 
 #[tauri::command]
 pub fn get_history(state: State<AppState>) -> Vec<String> {
-    state.settings.lock().unwrap().history.clone()
+    state.settings.lock_safe().history.clone()
 }
 
 /// 只接受已知影像副檔名,其他一律當 png(避免任意副檔名寫進暫存路徑)。
@@ -274,7 +292,7 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
     let prompt = prompt.trim().to_string();
     let (signin_no, is_claude, background_mode);
     {
-        let mut s = state.settings.lock().unwrap();
+        let mut s = state.settings.lock_safe();
         crate::i18n::set_locale(&s.locale);
         if prompt.is_empty() {
             return Err(crate::i18n::empty_prompt());
@@ -298,7 +316,7 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
         return match status {
             doctor::Status::Degraded { reason } => Err(reason),
             _ => {
-                *state.pending_prompt.lock().unwrap() = None;
+                *state.pending_prompt.lock_safe() = None;
                 let task = new_task(&state, prompt);
                 let outcome = launch_or_enqueue(&app, task)?;
                 if outcome == "launched" && !background_mode {
@@ -310,7 +328,7 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
     }
     // 登入已失效 → 重新走精靈(auth re-onboarding)
     if signin_no {
-        *state.pending_prompt.lock().unwrap() = Some(prompt);
+        *state.pending_prompt.lock_safe() = Some(prompt);
         show_window(&app, "wizard");
         hide_window(&app, "palette");
         return Ok("wizard".into());
@@ -324,14 +342,14 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
     .map_err(|e| e.to_string())?;
     match status {
         doctor::Status::NeedsSetup { .. } => {
-            *state.pending_prompt.lock().unwrap() = Some(prompt);
+            *state.pending_prompt.lock_safe() = Some(prompt);
             show_window(&app, "wizard");
             hide_window(&app, "palette");
             Ok("wizard".into())
         }
         doctor::Status::Degraded { reason } => Err(reason),
         doctor::Status::Ready => {
-            *state.pending_prompt.lock().unwrap() = None;
+            *state.pending_prompt.lock_safe() = None;
             let task = new_task(&state, prompt);
             let outcome = launch_or_enqueue(&app, task)?;
             if outcome == "launched" && !background_mode {
@@ -357,7 +375,7 @@ fn reservation(task: &QueuedTask) -> RunningTask {
 /// idle → 立刻寫入預約並把任務交還呼叫者啟動;否則入列回傳 None。
 /// 預約存在後,任何緊接著的決策都只會入列 — double-submit 不可能並行執行。
 fn reserve_or_enqueue(state: &AppState, task: QueuedTask) -> Option<QueuedTask> {
-    let mut q = state.queue.lock().unwrap();
+    let mut q = state.queue.lock_safe();
     if q.running.is_none() {
         q.running = Some(reservation(&task));
         Some(task)
@@ -396,7 +414,7 @@ fn launch_or_enqueue(app: &AppHandle, task: QueuedTask) -> Result<&'static str, 
 
 /// 佇列接續(任務結束時):單一鎖內清掉 running 並原子彈出+預約下一個任務。
 fn take_next(state: &AppState) -> Option<QueuedTask> {
-    pop_and_reserve_next(&mut state.queue.lock().unwrap())
+    pop_and_reserve_next(&mut state.queue.lock_safe())
 }
 
 /// 通知用的需求預覽(前 20 個字,按字元數而非位元組,CJK 安全)。
@@ -471,7 +489,7 @@ pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
         Ok(()) => {
             // 成功啟動過 → 視為已登入(auth 失敗時 runtime 會改回 No)
             {
-                let mut st = state.settings.lock().unwrap();
+                let mut st = state.settings.lock_safe();
                 if st.signin_state == SigninState::Unknown {
                     st.signin_state = SigninState::Yes;
                     let _ = settings::save(&settings::settings_path(), &st);
@@ -482,7 +500,7 @@ pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
         }
         Err(e) => {
             // 預約失效:清掉 running 並原子彈出+預約下一個,於鎖外接續啟動
-            let next = pop_and_reserve_next(&mut state.queue.lock().unwrap());
+            let next = pop_and_reserve_next(&mut state.queue.lock_safe());
             emit_queue_changed(app);
             if let Some(next_task) = next {
                 crate::notify(app, &crate::i18n::task_starting(&prompt_preview(&next_task.prompt)));
@@ -498,15 +516,15 @@ pub fn do_launch(app: &AppHandle, task: QueuedTask) -> Result<(), String> {
 /// do_launch 的實際啟動段:spawn 成功後在 queue 鎖內把 pid/background 補進
 /// 既有預約;Err 一律交給 do_launch 統一清預約並接續佇列。
 fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(), String> {
-    let s = state.settings.lock().unwrap().clone();
-    let cat = state.catalog_cache.lock().unwrap().clone();
+    let s = state.settings.lock_safe().clone();
+    let cat = state.catalog_cache.lock_safe().clone();
     let (model, notice) = resolve_usable_model(&s, &cat);
     if let Some(n) = notice {
         crate::notify(app, &n);
     }
     // 自動切換非 claude 模型時把新模型寫回設定(讓 chip/✓/下次啟動一致)
     if model != s.model && model != catalog::CLAUDE_MODEL {
-        let mut st = state.settings.lock().unwrap();
+        let mut st = state.settings.lock_safe();
         st.model = model.clone();
         let _ = settings::save(&settings::settings_path(), &st);
     }
@@ -524,6 +542,9 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
     let gen = task.id;
     let app2 = app.clone();
     // 兩種模式 waiter 都會呼叫(spawn v1.1 契約):先處理通知,再接續佇列。
+    // handle_task_exit / start_or_queue_next 內所有狀態鎖都走 lock_safe(中毒容忍),
+    // 因此即使其他執行緒讓 queue/settings 中毒,on_done 也不會半途 panic ——
+    // start_or_queue_next 必定執行且能推進佇列,契約得以維持(見 LockExt)。
     let on_done: launcher::OnDone = Box::new(move |code, log_path, elapsed| {
         handle_task_exit(&app2, code, &log_path, elapsed, is_background, &model);
         if is_background {
@@ -545,7 +566,7 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
     let spawn_result = {
         // 持鎖橫跨 spawn → 補 pid:waiter(handle_task_exit/start_or_queue_next)
         // 第一步就鎖 queue,因此「極速結束」也不會在 pid 寫入前清掉預約。
-        let mut q = state.queue.lock().unwrap();
+        let mut q = state.queue.lock_safe();
         match launcher::spawn(&spec, log, Some(on_done), on_line) {
             Ok(pid) => {
                 if let Some(rt) = q.running.as_mut().filter(|rt| rt.id == task.id) {
@@ -570,7 +591,7 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
 /// 退出中的任務是否為使用者主動停止(task_stop 標記)。
 /// 必須在 waiter 呼叫 start_or_queue_next 清掉 running「之前」讀取。
 fn task_was_stopping(state: &AppState) -> bool {
-    state.queue.lock().unwrap().running.as_ref().is_some_and(|rt| rt.stopping)
+    state.queue.lock_safe().running.as_ref().is_some_and(|rt| rt.stopping)
 }
 
 /// 任務結束通知決策(原本散在 launcher.rs 的 fast-fail 判斷移到這裡):
@@ -600,7 +621,7 @@ fn handle_task_exit(
         // 會以非零結束,所以 exit 0 才是可靠訊號。claude(Anthropic 帳號)不適用。
         if is_background && model != catalog::CLAUDE_MODEL {
             let state = app.state::<AppState>();
-            let mut st = state.settings.lock().unwrap();
+            let mut st = state.settings.lock_safe();
             if !st.known_free_models.iter().any(|m| m == model) {
                 st.known_free_models.push(model.to_string());
                 let _ = settings::save(&settings::settings_path(), &st);
@@ -626,7 +647,7 @@ fn handle_task_exit(
             // tier learning:記住這個模型要訂閱,模型選單據此標示
             let state = app.state::<AppState>();
             {
-                let mut st = state.settings.lock().unwrap();
+                let mut st = state.settings.lock_safe();
                 if !st.known_subscription_models.iter().any(|m| m == model) {
                     st.known_subscription_models.push(model.to_string());
                     let _ = settings::save(&settings::settings_path(), &st);
@@ -641,7 +662,7 @@ fn handle_task_exit(
             // Re-lock sign-in state so next submit_prompt triggers the wizard
             let state = app.state::<AppState>();
             {
-                let mut st = state.settings.lock().unwrap();
+                let mut st = state.settings.lock_safe();
                 st.signin_state = SigninState::No;
                 let _ = settings::save(&settings::settings_path(), &st);
             }
@@ -677,7 +698,7 @@ pub struct WizardPlan {
 #[tauri::command]
 pub async fn wizard_plan(state: State<'_, AppState>) -> Result<WizardPlan, String> {
     let (model, signed) = {
-        let s = state.settings.lock().unwrap();
+        let s = state.settings.lock_safe();
         (s.model.clone(), s.signin_state == SigninState::Yes)
     };
     let status = tauri::async_runtime::spawn_blocking(move || {
@@ -709,7 +730,7 @@ pub async fn wizard_plan(state: State<'_, AppState>) -> Result<WizardPlan, Strin
 #[tauri::command]
 pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<bootstrap::StepResult, String> {
     let model = {
-        let s = state.settings.lock().unwrap();
+        let s = state.settings.lock_safe();
         crate::i18n::set_locale(&s.locale);
         s.model.clone()
     };
@@ -754,7 +775,7 @@ pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<boot
             .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
     }
     if step == "signin" && res.ok {
-        let mut s = state.settings.lock().unwrap();
+        let mut s = state.settings.lock_safe();
         s.signin_state = SigninState::Yes;
         let _ = settings::save(&settings::settings_path(), &s);
     }
@@ -764,11 +785,11 @@ pub async fn wizard_run(state: State<'_, AppState>, step: String) -> Result<boot
 #[tauri::command]
 pub async fn wizard_done(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // 先嘗試啟動暫存需求;失敗時放回暫存並保留精靈視窗,讓使用者可重試
-    let pending = state.pending_prompt.lock().unwrap().take();
+    let pending = state.pending_prompt.lock_safe().take();
     if let Some(p) = pending {
         let task = new_task(&state, p.clone());
         if let Err(e) = launch_or_enqueue(&app, task) {
-            *state.pending_prompt.lock().unwrap() = Some(p);
+            *state.pending_prompt.lock_safe() = Some(p);
             return Err(e);
         }
     }
@@ -778,7 +799,7 @@ pub async fn wizard_done(app: AppHandle, state: State<'_, AppState>) -> Result<(
 
 #[tauri::command]
 pub fn list_cloud_models(state: State<AppState>) -> Vec<String> {
-    state.catalog_cache.lock().unwrap().clone()
+    state.catalog_cache.lock_safe().clone()
 }
 
 // ---------- v1.1: task queue ----------
@@ -791,13 +812,13 @@ pub struct QueueDto {
 
 #[tauri::command]
 pub fn queue_list(state: State<AppState>) -> QueueDto {
-    let q = state.queue.lock().unwrap();
+    let q = state.queue.lock_safe();
     QueueDto { running: q.running.clone(), queued: q.queued.iter().cloned().collect() }
 }
 
 /// 純佇列變更:移除指定 id,回傳是否有移除。
 fn cancel_in_queue(state: &AppState, id: u64) -> bool {
-    let mut q = state.queue.lock().unwrap();
+    let mut q = state.queue.lock_safe();
     let before = q.queued.len();
     q.queued.retain(|t| t.id != id);
     q.queued.len() != before
@@ -836,11 +857,11 @@ fn mark_stopping(q: &mut QueueState, expected_id: Option<u64>) -> Result<(u64, u
 /// 回 Err,不會誤殺接續的任務。
 #[tauri::command]
 pub fn task_stop(state: State<AppState>, _app: AppHandle, id: Option<u64>) -> Result<(), String> {
-    let (task_id, pid) = mark_stopping(&mut state.queue.lock().unwrap(), id)?;
+    let (task_id, pid) = mark_stopping(&mut state.queue.lock_safe(), id)?;
     use crate::command::Runner as _;
     if let Err(e) = SystemRunner.spawn_detached("taskkill", &["/PID", &pid.to_string(), "/T", "/F"]) {
         // taskkill 沒送出 → 撤銷標記,任務之後的自然結束不該被報成「已停止」
-        if let Some(rt) = state.queue.lock().unwrap().running.as_mut().filter(|rt| rt.id == task_id) {
+        if let Some(rt) = state.queue.lock_safe().running.as_mut().filter(|rt| rt.id == task_id) {
             rt.stopping = false;
         }
         return Err(e.to_string());
@@ -929,7 +950,7 @@ fn resolve_usable_model(s: &Settings, catalog: &[String]) -> (String, Option<Str
 #[tauri::command]
 pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
     let (current, known_sub, known_free, known_broken) = {
-        let s = state.settings.lock().unwrap();
+        let s = state.settings.lock_safe();
         (
             s.model.clone(),
             s.known_subscription_models.clone(),
@@ -937,7 +958,7 @@ pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
             s.known_broken_models.clone(),
         )
     };
-    let cat = state.catalog_cache.lock().unwrap().clone();
+    let cat = state.catalog_cache.lock_safe().clone();
     // 離線/尚未抓到目錄時至少回傳目前設定的模型
     let names = if cat.is_empty() { vec![current] } else { cat };
     // claude(Anthropic 帳號)永遠置頂,且不論目錄是否抓到都列出
@@ -963,7 +984,7 @@ pub async fn set_model(_app: AppHandle, state: State<'_, AppState>, name: String
     if name.is_empty() {
         return Err(crate::i18n::empty_model_name());
     }
-    let mut s = state.settings.lock().unwrap();
+    let mut s = state.settings.lock_safe();
     s.model = name;
     settings::save(&settings::settings_path(), &s).map_err(|e| e.to_string())
 }
@@ -1025,9 +1046,9 @@ fn remove_from(list: &mut Vec<String>, model: &str) {
 #[tauri::command]
 pub async fn scan_models(app: AppHandle, state: State<'_, AppState>) -> Result<ScanSummary, String> {
     // (1) 快照目錄 + 目前的 known_* 名單(鎖外探測前先 clone)
-    let catalog_models = state.catalog_cache.lock().unwrap().clone();
+    let catalog_models = state.catalog_cache.lock_safe().clone();
     let (known_sub, known_free, known_broken) = {
-        let s = state.settings.lock().unwrap();
+        let s = state.settings.lock_safe();
         (
             s.known_subscription_models.clone(),
             s.known_free_models.clone(),
@@ -1086,7 +1107,7 @@ pub async fn scan_models(app: AppHandle, state: State<'_, AppState>) -> Result<S
     // (4) 合併回設定(dedupe;重分類時從另外兩個名單移除),存檔一次
     let mut summary = ScanSummary { free: 0, subscription: 0, broken: 0, scanned: results.len(), skipped };
     {
-        let mut s = state.settings.lock().unwrap();
+        let mut s = state.settings.lock_safe();
         for (model, tier) in &results {
             match *tier {
                 "free" => {
@@ -1193,7 +1214,7 @@ pub fn refresh_plan(app: AppHandle) {
         let plan = fetch_plan(&UreqHttp);
         if plan.is_some() {
             let state = app.state::<AppState>();
-            *state.plan.lock().unwrap() = plan;
+            *state.plan.lock_safe() = plan;
         }
         end_plan_fetch();
     });
@@ -1288,6 +1309,16 @@ mod tests {
         task
     }
 
+    /// 模擬「某執行緒持鎖時 panic」使 Mutex 中毒:在本執行緒以 catch_unwind 製造,
+    /// libtest 會捕捉這次刻意 panic 的訊息,通過的測試不會輸出雜訊。
+    fn poison<T>(m: &Mutex<T>) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.lock_safe(); // 此刻尚未中毒 → 正常上鎖;持鎖時 panic → 中毒
+            panic!("deliberately poison the mutex for this test");
+        }));
+        assert!(m.is_poisoned(), "helper 必須使 mutex 中毒");
+    }
+
     #[test]
     fn task_ids_are_unique_and_increasing() {
         let st = state();
@@ -1303,7 +1334,7 @@ mod tests {
         // 沒有 running → 任務交還呼叫者啟動,佇列保持空
         let returned = reserve_or_enqueue(&st, task.clone());
         assert_eq!(returned, Some(task));
-        assert!(st.queue.lock().unwrap().queued.is_empty());
+        assert!(st.queue.lock_safe().queued.is_empty());
     }
 
     /// C1 釘住原子性 (a):idle 時的決策必須「當下就預約」running 槽位 —
@@ -1316,7 +1347,7 @@ mod tests {
         let launched = reserve_or_enqueue(&st, a.clone());
         assert_eq!(launched, Some(a.clone()));
         {
-            let q = st.queue.lock().unwrap();
+            let q = st.queue.lock_safe();
             let rt = q.running.as_ref().expect("決策當下就必須寫入預約");
             assert_eq!(rt.id, a.id);
             assert_eq!(rt.prompt, a.prompt);
@@ -1325,7 +1356,7 @@ mod tests {
         }
         let b_id = b.id;
         assert_eq!(reserve_or_enqueue(&st, b), None, "預約存在 → 第二個決策必須入列");
-        let q = st.queue.lock().unwrap();
+        let q = st.queue.lock_safe();
         assert_eq!(q.queued.iter().map(|t| t.id).collect::<Vec<_>>(), vec![b_id]);
         assert_eq!(q.running.as_ref().map(|rt| rt.id), Some(a.id), "預約不得被第二個決策覆蓋");
     }
@@ -1333,23 +1364,23 @@ mod tests {
     #[test]
     fn reserve_or_enqueue_queues_fifo_while_running() {
         let st = state();
-        st.queue.lock().unwrap().running = Some(running_task(99, true, Some(1234)));
+        st.queue.lock_safe().running = Some(running_task(99, true, Some(1234)));
         let a = enqueue_prompt(&st, "first");
         let b = enqueue_prompt(&st, "second");
         let c = enqueue_prompt(&st, "third");
-        let q: Vec<u64> = st.queue.lock().unwrap().queued.iter().map(|t| t.id).collect();
+        let q: Vec<u64> = st.queue.lock_safe().queued.iter().map(|t| t.id).collect();
         assert_eq!(q, vec![a.id, b.id, c.id], "佇列必須維持 FIFO 順序");
     }
 
     #[test]
     fn cancel_removes_only_the_requested_id() {
         let st = state();
-        st.queue.lock().unwrap().running = Some(running_task(99, true, None));
+        st.queue.lock_safe().running = Some(running_task(99, true, None));
         let a = enqueue_prompt(&st, "first");
         let b = enqueue_prompt(&st, "second");
         let c = enqueue_prompt(&st, "third");
         assert!(cancel_in_queue(&st, b.id));
-        let q: Vec<u64> = st.queue.lock().unwrap().queued.iter().map(|t| t.id).collect();
+        let q: Vec<u64> = st.queue.lock_safe().queued.iter().map(|t| t.id).collect();
         assert_eq!(q, vec![a.id, c.id]);
         assert!(!cancel_in_queue(&st, b.id), "重複取消同 id 應回報找不到");
         assert!(!cancel_in_queue(&st, 424242), "不存在的 id 應回報找不到");
@@ -1358,14 +1389,14 @@ mod tests {
     #[test]
     fn take_next_pops_fifo_and_clears_running_when_queue_empty() {
         let st = state();
-        st.queue.lock().unwrap().running = Some(running_task(99, true, Some(1)));
+        st.queue.lock_safe().running = Some(running_task(99, true, Some(1)));
         let a = enqueue_prompt(&st, "first");
         let b = enqueue_prompt(&st, "second");
         let next = take_next(&st).unwrap();
         assert_eq!(next.id, a.id);
         assert_eq!(take_next(&st).unwrap().id, b.id);
         assert!(take_next(&st).is_none(), "佇列清空後應回 None");
-        assert!(st.queue.lock().unwrap().running.is_none(), "沒有下一個任務時必須清掉 running");
+        assert!(st.queue.lock_safe().running.is_none(), "沒有下一個任務時必須清掉 running");
     }
 
     /// C1 釘住原子性 (b):take_next 在同一把鎖內「彈出+預約」— 彈出
@@ -1373,13 +1404,13 @@ mod tests {
     #[test]
     fn take_next_pops_and_reserves_atomically() {
         let st = state();
-        st.queue.lock().unwrap().running = Some(running_task(99, true, Some(1)));
+        st.queue.lock_safe().running = Some(running_task(99, true, Some(1)));
         let a = enqueue_prompt(&st, "first");
         let b = enqueue_prompt(&st, "second");
         let next = take_next(&st).unwrap();
         assert_eq!(next.id, a.id);
         {
-            let q = st.queue.lock().unwrap();
+            let q = st.queue.lock_safe();
             let rt = q.running.as_ref().expect("take_next 必須同時預約彈出的任務");
             assert_eq!(rt.id, a.id);
             assert_eq!(rt.pid, None, "pid 由 do_launch 在 spawn 後補上");
@@ -1388,8 +1419,33 @@ mod tests {
         let c = new_task(&st, "third".into());
         let c_id = c.id;
         assert_eq!(reserve_or_enqueue(&st, c), None, "彈出後緊接著的決策必須入列");
-        let order: Vec<u64> = st.queue.lock().unwrap().queued.iter().map(|t| t.id).collect();
+        let order: Vec<u64> = st.queue.lock_safe().queued.iter().map(|t| t.id).collect();
         assert_eq!(order, vec![b.id, c_id]);
+    }
+
+    /// 契約回歸:waiter 執行緒的 on_done → start_or_queue_next 依賴 take_next 把
+    /// 佇列往前推進。若某執行緒持 queue 鎖時 panic 使其中毒,天真的
+    /// `.lock().unwrap()` 會再次 panic,讓 on_done 半途夭折、佇列永遠卡在
+    /// 'running'(後續任務再也不啟動)。take_next 必須即使 queue 鎖中毒仍能
+    /// 彈出+預約下一個任務。
+    #[test]
+    fn take_next_advances_queue_even_when_queue_mutex_poisoned() {
+        let st = state();
+        st.queue.lock_safe().running = Some(running_task(99, true, Some(1)));
+        let a = enqueue_prompt(&st, "first");
+        let b = enqueue_prompt(&st, "second");
+
+        poison(&st.queue);
+        assert!(st.queue.is_poisoned(), "前置:queue 鎖必須已中毒");
+
+        // 修正前:take_next 在中毒鎖上 .lock().unwrap() → panic → 測試失敗(佇列卡死)。
+        let next = take_next(&st);
+        assert_eq!(next.map(|t| t.id), Some(a.id), "中毒仍須彈出佇列頭");
+
+        // 中毒後的讀取也必須容忍(into_inner 取回守衛)才能驗證狀態。
+        let q = st.queue.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(q.running.as_ref().map(|rt| rt.id), Some(a.id), "彈出的任務必須被預約為 running");
+        assert_eq!(q.queued.iter().map(|t| t.id).collect::<Vec<_>>(), vec![b.id], "只彈出一個,其餘保留");
     }
 
     #[test]
@@ -1424,9 +1480,9 @@ mod tests {
     fn task_was_stopping_reads_flag_from_running() {
         let st = state();
         assert!(!task_was_stopping(&st), "沒有 running → 非主動停止");
-        st.queue.lock().unwrap().running = Some(running_task(1, true, Some(42)));
+        st.queue.lock_safe().running = Some(running_task(1, true, Some(42)));
         assert!(!task_was_stopping(&st));
-        st.queue.lock().unwrap().running.as_mut().unwrap().stopping = true;
+        st.queue.lock_safe().running.as_mut().unwrap().stopping = true;
         assert!(task_was_stopping(&st));
     }
 
@@ -1644,7 +1700,7 @@ mod tests {
         let http = MockHttp::default()
             .on_post(API_ME_URL, Ok(r#"{"id":"x","email":"e","name":"n","plan":"free"}"#));
         assert_eq!(fetch_plan(&http), Some("free".to_string()));
-        let posts = http.posts.lock().unwrap();
+        let posts = http.posts.lock_safe();
         assert_eq!(posts.as_slice(), &[(API_ME_URL.to_string(), "{}".to_string())]);
     }
 
