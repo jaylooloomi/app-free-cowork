@@ -211,6 +211,7 @@ pub fn run() {
             ipc::list_cloud_models,
             ipc::open_logs,
             ipc::hide_palette,
+            ipc::hide_settings,
             ipc::open_settings_window,
             ipc::queue_list,
             ipc::queue_cancel,

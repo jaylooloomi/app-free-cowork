@@ -1426,6 +1426,12 @@ pub fn hide_palette(app: AppHandle) {
     hide_window(&app, "palette");
 }
 
+/// 隱藏設定視窗(走後端,避免前端 window.hide() 需要額外 capability 權限)。
+#[tauri::command]
+pub fn hide_settings(app: AppHandle) {
+    hide_window(&app, "settings");
+}
+
 #[tauri::command]
 pub fn open_settings_window(app: AppHandle) {
     show_window(&app, "settings");

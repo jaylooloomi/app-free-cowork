@@ -89,6 +89,8 @@ export const api = {
     invoke<string>("submit_prompt", { prompt, workdir: workdir ?? null }),
   /** 開原生資料夾選擇對話框,回傳路徑;取消回 null */
   pickFolder: () => invoke<string | null>("pick_folder"),
+  /** 隱藏設定視窗(走後端,免前端 window.hide capability) */
+  hideSettings: () => invoke<void>("hide_settings"),
   queueList: () => invoke<QueueDto>("queue_list"),
   queueCancel: (id: number) => invoke<void>("queue_cancel", { id }),
   /** 打勾移除一筆已完成項目 */

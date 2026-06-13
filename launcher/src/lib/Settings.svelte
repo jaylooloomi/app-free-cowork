@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { api, type Settings } from "./api";
   import { strings } from "./strings";
 
@@ -63,7 +62,7 @@
       clearTimeout(savedTimer);
       savedTimer = setTimeout(() => {
         saved = false;
-        getCurrentWindow().hide().catch(() => {});
+        api.hideSettings().catch(() => {});
       }, 600);
     } catch (e) {
       error = String(e);
