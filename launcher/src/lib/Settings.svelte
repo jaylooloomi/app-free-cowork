@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { api, type Settings } from "./api";
   import { strings } from "./strings";
 
@@ -58,8 +59,12 @@
       // 失敗(例:快捷鍵註冊失敗)→ 後端已回滾,顯示訊息,欄位保持可編輯重試
       await api.saveSettings(merged);
       saved = true;
+      // 顯示「已儲存 ✓」約 0.6 秒當回饋,然後關閉(隱藏)設定視窗;失敗則不關,留著修。
       clearTimeout(savedTimer);
-      savedTimer = setTimeout(() => (saved = false), 1500);
+      savedTimer = setTimeout(() => {
+        saved = false;
+        getCurrentWindow().hide().catch(() => {});
+      }, 600);
     } catch (e) {
       error = String(e);
     }
