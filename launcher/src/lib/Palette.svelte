@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { api, type StatusDto, type QueueDto, type ModelEntry, type Settings } from "./api";
@@ -224,6 +224,10 @@
       error = String(e);
     } finally {
       busy = false;
+      // 送出時 busy=true 會 disable 輸入框使其失焦;送完(或失敗)重新 enable
+      // 後把焦點還回去,方便連續下指令。等 tick 確保 DOM 已移除 disabled 再 focus。
+      await tick();
+      el?.focus();
     }
   }
 
