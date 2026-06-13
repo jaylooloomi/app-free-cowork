@@ -209,6 +209,7 @@ mod tests {
     use super::*;
     use crate::command::MockRunner;
     use crate::http::MockHttp;
+    use serial_test::serial;
 
     // ── install_ollama ────────────────────────────────────────────────────────
 
@@ -292,7 +293,12 @@ mod tests {
 
     // ── signin ────────────────────────────────────────────────────────────────
 
+    // These two tests contend on the process-global SIGNIN_GUARD mutex: the first
+    // holds it to simulate an in-progress signin while the second needs it free.
+    // #[serial] forces them to run sequentially so the held guard can't leak into
+    // the other test under the default parallel runner.
     #[test]
+    #[serial(signin_guard)]
     fn signin_guard_rejects_concurrent_call() {
         // detail 經 i18n(預設繁中)產生;固定語系避免與 i18n 測試平行設定 en 干擾。
         crate::i18n::set_locale("zh-TW");
@@ -309,6 +315,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(signin_guard)]
     fn signin_succeeds_when_guard_is_free() {
         // Ensure the guard is not held (previous test drops _held at end of scope)
         let r = MockRunner::default().on("ollama signin", 0, "paired");
