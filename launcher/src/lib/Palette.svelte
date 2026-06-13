@@ -47,6 +47,10 @@
   // 目前任務的世代號(= 後端 task id):只接受 gen 相符的串流事件,
   // 避免跨任務事件投遞競爭把舊任務輸出混進新任務。
   let activeGen = $state<number | null>(null);
+  // 每個已完成任務的輸出快照(key = task id),供「看 detail」就地展開。
+  // 串流結束時拍快照;與完成清單同生命週期(refreshQueue 會清掉已移除的)。
+  let outputHistory = $state<Record<number, { text: string; tools: string[] }>>({});
+  let expandedId = $state<number | null>(null); // 目前展開查看細節的已完成項目 id
 
   async function refresh() {
     try {
@@ -74,8 +78,13 @@
       const q = await api.queueList();
       if (gen === queueGen) {
         queue = q;
-        // 已從後端清單移除的項目,一併從 checking 動畫集合清掉(避免殘留 id)
-        checking = checking.filter((id) => q.completed.some((c) => c.id === id));
+        // 已從後端清單移除的項目,一併清掉殘留狀態:checking 動畫、輸出快照、展開狀態
+        const ids = new Set(q.completed.map((c) => c.id));
+        checking = checking.filter((id) => ids.has(id));
+        for (const k of Object.keys(outputHistory)) {
+          if (!ids.has(Number(k))) delete outputHistory[Number(k)];
+        }
+        if (expandedId !== null && !ids.has(expandedId)) expandedId = null;
       }
     } catch {
       if (gen === queueGen) queue = null;
@@ -152,6 +161,11 @@
       taskRunning = false;
       // 程序非正常結束又沒吐 result 行(崩潰/被殺/spawn 失敗)→ 標記為失敗
       if (taskResult === null && e.payload.code !== 0) taskError = true;
+      // 拍快照:供完成清單那筆「看 detail」就地展開(result 行已先於 end 抵達)
+      const text = taskResult ?? taskText;
+      if (text || taskTools.length) {
+        outputHistory[e.payload.gen] = { text, tools: [...taskTools] };
+      }
     });
     // busy(任務送出中)時不自動隱藏 — 避免提交瞬間失焦把面板關掉
     const onBlur = () => {
@@ -404,6 +418,12 @@
     window.setTimeout(() => api.dismissCompleted(id).catch((e) => (error = String(e))), 500);
   }
 
+  // 點已完成項目的文字 → 就地展開/收合它的執行細節(僅有快照者可展開)。
+  function toggleDetail(id: number) {
+    if (!outputHistory[id]) return;
+    expandedId = expandedId === id ? null : id;
+  }
+
   // A-Z 排序,但 claude(anthropic)永遠置頂 — localeCompare 會把 "claude"
   // 按字串排到中間,因此先抽出 claude、其餘排序後再前插。
   function sortModels(list: ModelEntry[]): ModelEntry[] {
@@ -620,9 +640,25 @@
           >
             {#if checking.includes(c.id)}✓{:else}{c.ok ? "○" : "✗"}{/if}
           </button>
-          <span class="qtext">{truncate(c.prompt)}</span>
+          {#if outputHistory[c.id]}
+            <button class="qtext detail-toggle" onclick={() => toggleDetail(c.id)} title={S.completedDetailTip}>
+              <span class="caret">{expandedId === c.id ? "▾" : "▸"}</span>{truncate(c.prompt)}
+            </button>
+          {:else}
+            <span class="qtext">{truncate(c.prompt)}</span>
+          {/if}
           {#if !c.ok}<span class="qstate fail">{S.completedFailed}</span>{/if}
         </div>
+        {#if expandedId === c.id && outputHistory[c.id]}
+          <div class="qdetail">
+            {#if outputHistory[c.id].tools.length}
+              <div class="otools">
+                {#each outputHistory[c.id].tools as t, i (i)}<span class="otool">🔧 {t}</span>{/each}
+              </div>
+            {/if}
+            {#if outputHistory[c.id].text}<div class="qdetail-text">{outputHistory[c.id].text}</div>{/if}
+          </div>
+        {/if}
       {/each}
     </div>
   {/if}
@@ -982,6 +1018,52 @@
   }
   .qstate.fail {
     color: #f7768e;
+  }
+  /* 已完成項目的文字 → 可點開細節的按鈕 */
+  .detail-toggle {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border: none;
+    background: none;
+    color: #aaa;
+    font: inherit;
+    text-align: left;
+    padding: 0;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .detail-toggle:hover {
+    color: #eee;
+  }
+  .caret {
+    flex-shrink: 0;
+    color: #777;
+    font-size: 10px;
+  }
+  /* 就地展開的執行細節 */
+  .qdetail {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 2px 0 4px 26px;
+    padding: 8px 10px;
+    border-left: 2px solid var(--panel-border);
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 0 6px 6px 0;
+  }
+  .qdetail-text {
+    font-size: 12px;
+    color: #ddd;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+    max-height: 180px;
+    overflow: auto;
   }
   .bar {
     display: flex;
