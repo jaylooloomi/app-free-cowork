@@ -69,6 +69,8 @@ export const api = {
   startVoiceInput: () => invoke<void>("start_voice_input"),
   /** OS acrylic 效果是否真的套上(決定 fx-glass / fx-solid)。 */
   effectsApplied: () => invoke<boolean>("effects_applied"),
+  /** 把貼上的圖片位元組存成暫存檔,回傳路徑。 */
+  savePastedImage: (data: number[], ext: string) => invoke<string>("save_pasted_image", { data, ext }),
   wizardPlan: () => invoke<WizardPlan>("wizard_plan"),
   wizardRun: (step: string) => invoke<StepResult>("wizard_run", { step }),
   wizardDone: () => invoke<void>("wizard_done"),

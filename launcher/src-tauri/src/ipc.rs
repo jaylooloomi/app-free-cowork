@@ -207,6 +207,29 @@ pub fn get_history(state: State<AppState>) -> Vec<String> {
     state.settings.lock().unwrap().history.clone()
 }
 
+/// 只接受已知影像副檔名,其他一律當 png(避免任意副檔名寫進暫存路徑)。
+fn sanitize_image_ext(ext: &str) -> String {
+    match ext.to_lowercase().as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => ext.to_lowercase(),
+        _ => "png".into(),
+    }
+}
+
+/// 把貼上/拖入的圖片位元組存成暫存檔,回傳路徑供帶入 prompt(Claude Code 讀檔看圖)。
+#[tauri::command]
+pub fn save_pasted_image(data: Vec<u8>, ext: String) -> Result<String, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join("free-claude-code-paste");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("paste-{stamp}.{}", sanitize_image_ext(&ext)));
+    std::fs::write(&path, &data).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// 回傳 "launched" | "queued" | "wizard";Err(中文訊息) 顯示在面板。
 #[tauri::command]
 pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: String) -> Result<String, String> {
@@ -1056,6 +1079,17 @@ mod tests {
             vec!["minimax-m2.7:cloud".to_string()],
             "tier learning 以記憶體為準"
         );
+    }
+
+    #[test]
+    fn sanitize_image_ext_allows_known_and_defaults_others() {
+        assert_eq!(sanitize_image_ext("PNG"), "png");
+        assert_eq!(sanitize_image_ext("jpeg"), "jpeg");
+        assert_eq!(sanitize_image_ext("webp"), "webp");
+        // 不在白名單 / 含路徑字元 → 一律 png(防止任意副檔名)
+        assert_eq!(sanitize_image_ext("exe"), "png");
+        assert_eq!(sanitize_image_ext("../evil"), "png");
+        assert_eq!(sanitize_image_ext(""), "png");
     }
 
     /// M2:同一時間只允許一個 in-flight plan 抓取;結束後可再抓。

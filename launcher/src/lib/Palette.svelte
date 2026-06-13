@@ -25,6 +25,8 @@
   let transient = $state("");
   let transientTimer: number | undefined;
   let listenTimer: number | undefined;
+  // 貼上/拖入的圖片暫存路徑(送出時帶入 prompt)
+  let attachments = $state<string[]>([]);
 
   async function refresh() {
     try {
@@ -82,6 +84,7 @@
       transient = "";
       hIndex = -1;
       dropdownOpen = false;
+      attachments = [];
       stopListening();
       refresh();
       refreshQueue();
@@ -134,13 +137,19 @@
 
   async function submit() {
     if (busy || offline) return;
+    if (!input.trim() && attachments.length === 0) return;
     error = "";
     busy = true;
     try {
+      // 有附圖時把圖片路徑接進 prompt,讓 Claude Code 讀檔看圖
+      const fullPrompt = attachments.length
+        ? `${attachments.map((p) => `請看這張圖片:${p}`).join("\n")}\n${input}`.trim()
+        : input;
       // "launched"/"wizard" 時後端已隱藏面板;"queued" 保持開啟並提示已入列
-      const outcome = await api.submitPrompt(input);
+      const outcome = await api.submitPrompt(fullPrompt);
       if (outcome === "queued") {
         input = "";
+        attachments = [];
         hIndex = -1;
         showTransient(S.queuedToast);
       }
@@ -149,6 +158,31 @@
     } finally {
       busy = false;
     }
+  }
+
+  // 貼上圖片:存成暫存檔,顯示為可移除的附件卡。
+  async function onPaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.kind === "file" && it.type.startsWith("image/")) {
+        e.preventDefault();
+        const file = it.getAsFile();
+        if (!file) continue;
+        try {
+          const buf = new Uint8Array(await file.arrayBuffer());
+          const ext = (it.type.split("/")[1] || "png").toLowerCase();
+          const path = await api.savePastedImage(Array.from(buf), ext);
+          attachments = [...attachments, path];
+        } catch (err) {
+          error = String(err);
+        }
+      }
+    }
+  }
+
+  function removeAttachment(i: number) {
+    attachments = attachments.filter((_, idx) => idx !== i);
   }
 
   // Escape 走全域(svelte:window)— 不管焦點在哪都能關閉選單/面板,並處理層級:
@@ -220,7 +254,8 @@
     }
     error = "";
     try {
-      models = await api.listModelsUi();
+      const list = await api.listModelsUi();
+      models = list.sort((a, b) => a.name.localeCompare(b.name));
       dropdownOpen = true;
     } catch (e) {
       error = String(e);
@@ -284,8 +319,7 @@
 
   const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
 
-  // mic tooltip 帶入使用者實際設定的快捷鍵;尚未取得設定時退回預設值
-  const micTip = $derived(S.micTooltip(settings?.hotkey || "Alt+H"));
+  const micTip = S.micTooltip();
 
   // ✓ 以設定檔的 model 為準(offline 時 status.model 可能不可靠),退回 status?.model
   const currentModel = $derived(settings?.model || status?.model);
@@ -294,12 +328,24 @@
 <svelte:window onkeydown={onGlobalKey} />
 
 <main class="palette" bind:this={rootEl}>
+  {#if attachments.length > 0}
+    <div class="attachments">
+      {#each attachments as path, i (path)}
+        <span class="attach">
+          <span class="attach-name">🖼 {path.split(/[\\/]/).pop()}</span>
+          <button class="attach-x" onclick={() => removeAttachment(i)} title={S.attachRemoveTip} aria-label={S.attachRemoveTip}>✕</button>
+        </span>
+      {/each}
+      <span class="attach-hint">{S.attachHint}</span>
+    </div>
+  {/if}
   <div class="input-row">
     <input
       bind:this={el}
       bind:value={input}
       placeholder={S.placeholder}
       onkeydown={onKey}
+      onpaste={onPaste}
       oninput={() => listening && stopListening()}
       disabled={busy || offline}
     />
@@ -388,6 +434,45 @@
     flex-direction: column;
     gap: 8px;
     padding: 16px;
+  }
+  .attachments {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .attach {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #ddd;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    padding: 3px 6px 3px 8px;
+    max-width: 240px;
+  }
+  .attach-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .attach-x {
+    border: none;
+    background: none;
+    color: #888;
+    font-size: 11px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;
+  }
+  .attach-x:hover {
+    color: #f7768e;
+  }
+  .attach-hint {
+    font-size: 11px;
+    color: #888;
   }
   .input-row {
     display: flex;

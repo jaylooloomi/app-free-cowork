@@ -43,6 +43,8 @@ export const S = {
   planPro: "Pro",
   planMax: "Max",
   planTooltip: "查看用量與重置時間",
-  micTooltip: (hotkey: string) => `語音輸入(再按一次 ${hotkey} 也可啟動)`,
+  micTooltip: () => `語音輸入(說話轉文字)`,
   voiceHint: "語音輸入已啟動,請開始說話",
+  attachRemoveTip: "移除這張圖片",
+  attachHint: "圖片需搭配支援視覺的模型(如 qwen3-vl:235b-cloud)",
 };

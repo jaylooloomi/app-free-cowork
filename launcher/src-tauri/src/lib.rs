@@ -40,14 +40,10 @@ pub fn sync_autostart(app: &AppHandle, enabled: bool) {
 
 fn show_palette_centered(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("palette") {
-        // 已顯示 → 只取焦點;不重新定位、不重發 palette-shown(避免清空使用者輸入)
+        // 已顯示 → 再按一次快捷鍵 = 關閉面板(標準 toggle 行為)。
+        // 語音輸入改由面板上的麥克風鈕觸發。
         if w.is_visible().unwrap_or(false) {
-            let _ = w.set_focus();
-            // Alt+H 第二次按下(面板已開)→ 啟動 Windows 語音輸入(Win+H)
-            let app2 = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = ipc::start_voice_input(app2).await;
-            });
+            let _ = w.hide();
             return;
         }
         // Lazy catalog refresh: recover from offline-at-boot
@@ -165,7 +161,8 @@ pub fn run() {
             ipc::set_model,
             ipc::open_url,
             ipc::start_voice_input,
-            ipc::effects_applied
+            ipc::effects_applied,
+            ipc::save_pasted_image
         ])
         .on_window_event(|window, event| {
             // 三個視窗都只隱藏、永不關閉 — 否則 X 會銷毀視窗導致 app 結束
