@@ -51,6 +51,7 @@
         working_dir: snap.working_dir,
         autostart: snap.autostart,
         locale: snap.locale,
+        system_prompt: snap.system_prompt,
       };
       // 失敗(例:快捷鍵註冊失敗)→ 後端已回滾,顯示訊息,欄位保持可編輯重試
       await api.saveSettings(merged);
@@ -99,6 +100,15 @@
       <input bind:value={s.working_dir} placeholder={S.settingsWorkingDirPlaceholder} /></label
     >
     <label class="row"><input type="checkbox" bind:checked={s.autostart} /> {S.settingsAutostart}</label>
+    <label
+      >{S.settingsSystemPrompt}
+      <textarea
+        bind:value={s.system_prompt}
+        rows="4"
+        placeholder={S.settingsSystemPromptPlaceholder}
+      ></textarea>
+      <small>{S.settingsSystemPromptHint}</small></label
+    >
     <div class="actions">
       <button class="primary" onclick={save}>{S.settingsSave}</button>
       <button onclick={openLogs}>{S.settingsOpenLogs}</button>
@@ -132,7 +142,8 @@
     gap: 8px;
   }
   input:not([type="checkbox"]),
-  select {
+  select,
+  textarea {
     padding: 8px;
     border-radius: 6px;
     border: 1px solid #444;
@@ -140,8 +151,14 @@
     color: #eee;
     outline: none;
   }
+  textarea {
+    font-family: inherit;
+    font-size: 13px;
+    resize: vertical;
+  }
   input:not([type="checkbox"]):focus,
-  select:focus {
+  select:focus,
+  textarea:focus {
     border-color: #7aa2f7;
   }
   small {

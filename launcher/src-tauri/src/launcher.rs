@@ -58,8 +58,14 @@ fn agent_system_prompt(locale: &str) -> &'static str {
 }
 
 /// 把系統提示插在 claude 參數最前面:`--append-system-prompt <文字>`。
+/// 使用者自訂(settings.system_prompt 非空)優先,否則用內建的語言預設。
 fn system_prompt_args(s: &Settings) -> Vec<String> {
-    vec!["--append-system-prompt".into(), agent_system_prompt(&s.locale).into()]
+    let text: String = if s.system_prompt.trim().is_empty() {
+        agent_system_prompt(&s.locale).into()
+    } else {
+        s.system_prompt.clone()
+    };
+    vec!["--append-system-prompt".into(), text]
 }
 
 pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec {
@@ -257,6 +263,19 @@ mod tests {
         assert!(!spec.args.iter().any(|a| a == "launch" || a == "--model"));
         // 真 Claude 不限制輸出
         assert!(spec.env.is_empty());
+    }
+
+    #[test]
+    fn custom_system_prompt_overrides_default() {
+        // 預設(空)→ 用內建語言預設
+        let spec = build_launch_spec("p", &Settings::default(), "minimax-m2.5:cloud");
+        let i = spec.args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert_eq!(spec.args[i + 1], agent_system_prompt("zh-TW"));
+        // 自訂 → 用使用者的文字
+        let s = Settings { system_prompt: "只用注音回答".into(), ..Default::default() };
+        let spec = build_launch_spec("p", &s, "minimax-m2.5:cloud");
+        let i = spec.args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert_eq!(spec.args[i + 1], "只用注音回答");
     }
 
     #[test]

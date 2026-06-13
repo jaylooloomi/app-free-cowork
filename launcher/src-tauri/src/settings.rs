@@ -25,6 +25,9 @@ pub struct Settings {
     pub known_broken_models: Vec<String>,
     /// 介面語言:"zh-TW"(預設)或 "en"。前端 UI 與後端通知/錯誤訊息都依此切換。
     pub locale: String,
+    /// 自訂「助手個性」系統提示;留空 = 使用內建的「動手型助手」預設(依語言)。
+    /// 進階使用者可改寫,改變 AI 的行事風格。
+    pub system_prompt: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -41,6 +44,7 @@ impl Default for Settings {
             known_free_models: Vec::new(),
             known_broken_models: Vec::new(),
             locale: "zh-TW".into(),
+            system_prompt: String::new(),
         }
     }
 }
