@@ -55,6 +55,7 @@ const zhTW = {
   tierSubscription: "需訂閱",
   tierUnknown: "未知",
   tierAnthropic: "你的 Claude 帳號",
+  claudeOfficial: "Claude(Anthropic 官方)",
   tierBroken: "無法使用",
   tierIncompatible: "不支援",
   modelScan: "🔍 檢查可用性",
@@ -70,6 +71,8 @@ const zhTW = {
   micTooltip: (hk: string) => `語音輸入(說話轉文字;快捷鍵 ${hk})`,
   captureTooltip: (hk: string) => `截圖(框選後自動貼入;快捷鍵 ${hk})`,
   capturingHint: "截圖中…框選你要的範圍",
+  pickFolderTooltip: "選擇工作資料夾(讓 AI 針對此資料夾的檔案作業)",
+  workdirClearTip: "清除工作資料夾",
   voiceHint: "語音輸入已啟動,請開始說話",
   // ---------- 串流結果回顯 ----------
   outputRunning: "執行中…",
@@ -142,6 +145,7 @@ const en = {
   tierSubscription: "Subscription",
   tierUnknown: "Unknown",
   tierAnthropic: "Your Claude account",
+  claudeOfficial: "Claude (Anthropic official)",
   tierBroken: "Unavailable",
   tierIncompatible: "Unsupported",
   modelScan: "🔍 Check availability",
@@ -157,6 +161,8 @@ const en = {
   micTooltip: (hk: string) => `Voice input (speech to text; shortcut ${hk})`,
   captureTooltip: (hk: string) => `Screenshot (snip a region; auto-attached; shortcut ${hk})`,
   capturingHint: "Capturing… select the region you want",
+  pickFolderTooltip: "Pick a working folder (have the AI work on its files)",
+  workdirClearTip: "Clear working folder",
   voiceHint: "Voice input is active — start speaking",
   // ---------- streaming output ----------
   outputRunning: "Running…",

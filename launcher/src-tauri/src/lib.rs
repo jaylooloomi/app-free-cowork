@@ -126,7 +126,7 @@ fn handle_argv(app: &AppHandle, argv: &[String]) {
             let prompt = prompt.clone();
             tauri::async_runtime::spawn(async move {
                 let state = handle.state::<AppState>();
-                if let Err(e) = ipc::submit_prompt(handle.clone(), state, prompt).await {
+                if let Err(e) = ipc::submit_prompt(handle.clone(), state, prompt, None).await {
                     notify(&handle, &e);
                 }
             });
@@ -223,7 +223,8 @@ pub fn run() {
             ipc::start_voice_input,
             ipc::effects_applied,
             ipc::save_pasted_image,
-            ipc::capture_screenshot
+            ipc::capture_screenshot,
+            ipc::pick_folder
         ])
         .on_window_event(|window, event| {
             // 三個視窗都只隱藏、永不關閉 — 否則 X 會銷毀視窗導致 app 結束

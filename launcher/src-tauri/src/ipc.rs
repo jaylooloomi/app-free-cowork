@@ -30,6 +30,10 @@ impl<T> LockExt<T> for Mutex<T> {
 pub struct QueuedTask {
     pub id: u64,
     pub prompt: String,
+    /// 本次任務的工作資料夾(使用者用「選資料夾」鈕指定);None = 用設定的預設工作目錄。
+    /// Agent 會在此資料夾內作業(類似 Cowork「指一個工作區」)。
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// 執行中的任務;pid 供 task_stop 以 taskkill 終止背景任務。
@@ -384,9 +388,23 @@ fn write_temp_image(bytes: &[u8]) -> std::io::Result<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// 開啟原生「選擇資料夾」對話框,回傳選到的絕對路徑;取消 → None。
+/// 選到的資料夾會成為下次任務的工作目錄(Agent 在此資料夾作業)。
+#[tauri::command]
+pub async fn pick_folder() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("選擇工作資料夾")
+            .pick_folder()
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// 回傳 "launched" | "queued" | "wizard";Err(中文訊息) 顯示在面板。
 #[tauri::command]
-pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: String) -> Result<String, String> {
+pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: String, workdir: Option<String>) -> Result<String, String> {
     let prompt = prompt.trim().to_string();
     let (signin_no, is_claude, background_mode);
     {
@@ -415,7 +433,7 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
             doctor::Status::Degraded { reason } => Err(reason),
             _ => {
                 *state.pending_prompt.lock_safe() = None;
-                let task = new_task(&state, prompt);
+                let task = new_task(&state, prompt, workdir);
                 let outcome = launch_or_enqueue(&app, task)?;
                 if outcome == "launched" && !background_mode {
                     hide_window(&app, "palette");
@@ -448,7 +466,7 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
         doctor::Status::Degraded { reason } => Err(reason),
         doctor::Status::Ready => {
             *state.pending_prompt.lock_safe() = None;
-            let task = new_task(&state, prompt);
+            let task = new_task(&state, prompt, workdir);
             let outcome = launch_or_enqueue(&app, task)?;
             if outcome == "launched" && !background_mode {
                 hide_window(&app, "palette");
@@ -459,8 +477,8 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
 }
 
 /// 配發單調遞增 id 的新任務。
-fn new_task(state: &AppState, prompt: String) -> QueuedTask {
-    QueuedTask { id: state.next_task_id.fetch_add(1, Ordering::Relaxed), prompt }
+fn new_task(state: &AppState, prompt: String, cwd: Option<String>) -> QueuedTask {
+    QueuedTask { id: state.next_task_id.fetch_add(1, Ordering::Relaxed), prompt, cwd }
 }
 
 /// 預約紀錄:決策當下就佔住 running 槽位,pid/background 由 do_launch
@@ -643,7 +661,14 @@ fn try_launch(app: &AppHandle, state: &AppState, task: QueuedTask) -> Result<(),
         st.model = model.clone();
         let _ = settings::save(&settings::settings_path(), &st);
     }
-    let spec = launcher::build_launch_spec(&task.prompt, &s, &model);
+    let mut spec = launcher::build_launch_spec(&task.prompt, &s, &model);
+    // 使用者用「選資料夾」鈕指定了工作資料夾 → 覆寫本次任務的 cwd(Agent 在此作業)。
+    if let Some(dir) = task.cwd.as_deref() {
+        let p = std::path::PathBuf::from(dir);
+        if p.is_dir() {
+            spec.cwd = p;
+        }
+    }
     let is_background = spec.background;
     // 無腦模式(非謹慎):前景互動啟動前先預先信任工作目錄,免去 Claude Code
     // 「資料夾信任」確認(背景 -p 模式本來就自動信任)。謹慎模式保留該確認當把關。
@@ -906,7 +931,7 @@ pub async fn wizard_done(app: AppHandle, state: State<'_, AppState>) -> Result<(
     // 先嘗試啟動暫存需求;失敗時放回暫存並保留精靈視窗,讓使用者可重試
     let pending = state.pending_prompt.lock_safe().take();
     if let Some(p) = pending {
-        let task = new_task(&state, p.clone());
+        let task = new_task(&state, p.clone(), None);
         if let Err(e) = launch_or_enqueue(&app, task) {
             *state.pending_prompt.lock_safe() = Some(p);
             return Err(e);
@@ -1443,7 +1468,7 @@ mod tests {
     }
 
     fn enqueue_prompt(st: &AppState, prompt: &str) -> QueuedTask {
-        let task = new_task(st, prompt.into());
+        let task = new_task(st, prompt.into(), None);
         assert!(reserve_or_enqueue(st, task.clone()).is_none(), "running 中應入列");
         task
     }
@@ -1461,15 +1486,15 @@ mod tests {
     #[test]
     fn task_ids_are_unique_and_increasing() {
         let st = state();
-        let a = new_task(&st, "a".into());
-        let b = new_task(&st, "b".into());
+        let a = new_task(&st, "a".into(), None);
+        let b = new_task(&st, "b".into(), None);
         assert!(b.id > a.id);
     }
 
     #[test]
     fn reserve_or_enqueue_launches_directly_when_idle() {
         let st = state();
-        let task = new_task(&st, "hi".into());
+        let task = new_task(&st, "hi".into(), None);
         // 沒有 running → 任務交還呼叫者啟動,佇列保持空
         let returned = reserve_or_enqueue(&st, task.clone());
         assert_eq!(returned, Some(task));
@@ -1481,8 +1506,8 @@ mod tests {
     #[test]
     fn reserve_or_enqueue_reserves_running_slot_atomically() {
         let st = state();
-        let a = new_task(&st, "first".into());
-        let b = new_task(&st, "second".into());
+        let a = new_task(&st, "first".into(), None);
+        let b = new_task(&st, "second".into(), None);
         let launched = reserve_or_enqueue(&st, a.clone());
         assert_eq!(launched, Some(a.clone()));
         {
@@ -1555,7 +1580,7 @@ mod tests {
             assert_eq!(rt.pid, None, "pid 由 do_launch 在 spawn 後補上");
             assert!(!rt.stopping);
         }
-        let c = new_task(&st, "third".into());
+        let c = new_task(&st, "third".into(), None);
         let c_id = c.id;
         assert_eq!(reserve_or_enqueue(&st, c), None, "彈出後緊接著的決策必須入列");
         let order: Vec<u64> = st.queue.lock_safe().queued.iter().map(|t| t.id).collect();

@@ -36,6 +36,10 @@
   let listenTimer: number | undefined;
   // 貼上/拖入的圖片暫存路徑(送出時帶入 prompt)
   let attachments = $state<string[]>([]);
+  // 使用者用「選資料夾」鈕指定的工作資料夾(Agent 在此作業);null = 用設定預設。
+  // 黏著式:設定後持續沿用到多個任務,直到清除。
+  let workdir = $state<string | null>(null);
+  let picking = $state(false); // 資料夾選擇對話框進行中(暫停自動隱藏面板)
 
   // 串流結果回顯(背景模式):後端把 claude 的 stream-json 逐行轉送過來,
   // 前端解析後即時顯示助手文字、工具呼叫與最終結果。
@@ -177,7 +181,7 @@
     });
     // busy(任務送出中)/ capturing(截圖中,後端會自行隱藏再顯示)時不自動隱藏
     const onBlur = () => {
-      if (!busy && !capturing) api.hidePalette().catch(() => {});
+      if (!busy && !capturing && !picking) api.hidePalette().catch(() => {});
     };
     window.addEventListener("blur", onBlur);
     // 視窗高度貼齊內容(佇列、模型選單、串流結果):下限 110、上限 600。
@@ -234,7 +238,7 @@
         ? `${attachments.map((p) => `請看這張圖片:${p}`).join("\n")}\n${input}`.trim()
         : input;
       // "launched"/"wizard" 時後端已隱藏面板;"queued" 保持開啟並提示已入列
-      const outcome = await api.submitPrompt(fullPrompt);
+      const outcome = await api.submitPrompt(fullPrompt, workdir);
       // 背景(串流)模式啟動後面板保留顯示輸出 → 清空輸入,等下一個指令;
       // 入列時同樣清空並提示。前景模式後端已隱藏面板,清空無妨。
       if (outcome === "launched" || outcome === "queued") {
@@ -422,6 +426,26 @@
     }
   }
 
+  // 選資料夾鈕:開原生對話框 → 設為本次(及後續)任務的工作資料夾(黏著、可清除)。
+  async function onPickFolder() {
+    if (picking) return;
+    error = "";
+    picking = true;
+    try {
+      const dir = await api.pickFolder();
+      if (dir) workdir = dir;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      picking = false;
+      el?.focus();
+    }
+  }
+
+  function clearWorkdir() {
+    workdir = null;
+  }
+
   async function stopTask() {
     error = "";
     try {
@@ -571,7 +595,7 @@
 
   // claude 哨符在選單顯示成易讀名稱
   function modelLabel(name: string): string {
-    return name === "claude" ? "Claude(Anthropic 官方)" : name;
+    return name === "claude" ? S.claudeOfficial : name;
   }
 
   const micTip = $derived(S.micTooltip(settings?.voice_hotkey || "Alt+J"));
@@ -591,6 +615,14 @@
 <svelte:window onkeydown={onGlobalKey} />
 
 <main class="palette" bind:this={rootEl}>
+  {#if workdir}
+    <div class="attachments">
+      <span class="attach workdir" title={workdir}>
+        <span class="attach-name">📁 {workdir.split(/[\\/]/).pop() || workdir}</span>
+        <button class="attach-x" onclick={clearWorkdir} title={S.workdirClearTip} aria-label={S.workdirClearTip}>✕</button>
+      </span>
+    </div>
+  {/if}
   {#if attachments.length > 0}
     <div class="attachments">
       {#each attachments as path, i (path)}
@@ -612,6 +644,29 @@
       oninput={() => listening && stopListening()}
       disabled={busy || offline}
     />
+    <button
+      class="cap"
+      class:active={!!workdir}
+      onclick={onPickFolder}
+      onmousedown={(e) => e.preventDefault()}
+      disabled={busy || offline || picking}
+      title={S.pickFolderTooltip}
+      aria-label={S.pickFolderTooltip}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        width="18"
+        height="18"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      </svg>
+    </button>
     <button
       class="cap"
       onclick={onCapture}
@@ -967,6 +1022,10 @@
   .cap:disabled {
     opacity: 0.4;
     cursor: default;
+  }
+  /* 已選工作資料夾時,資料夾鈕高亮提示 */
+  .cap.active {
+    color: #7aa2f7;
   }
   .mic.listening {
     color: #7aa2f7;
