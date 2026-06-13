@@ -159,6 +159,7 @@ pub fn run() {
             ipc::task_stop,
             ipc::list_models_ui,
             ipc::set_model,
+            ipc::scan_models,
             ipc::open_url,
             ipc::start_voice_input,
             ipc::effects_applied,

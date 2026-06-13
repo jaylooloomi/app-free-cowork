@@ -40,6 +40,13 @@ export const S = {
   tierSubscription: "需訂閱",
   tierUnknown: "未知",
   tierAnthropic: "你的 Claude 帳號",
+  tierBroken: "無法使用",
+  modelScan: "🔍 檢查可用性",
+  modelScanning: (d: number, t: number) => `檢查中 ${d}/${t}…`,
+  modelScanDone: (s: { free: number; subscription: number; broken: number; scanned: number; skipped: number }) =>
+    `檢查完成:免費 ${s.free}・需訂閱 ${s.subscription}・無法使用 ${s.broken}(共測 ${s.scanned})`,
+  modelShowAll: "顯示全部",
+  modelOnlyUsable: "預設只顯示可用模型(你的 Claude 帳號 + 免費)",
   planFree: "免費方案",
   planPro: "Pro",
   planMax: "Max",

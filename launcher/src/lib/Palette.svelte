@@ -21,6 +21,11 @@
   let queue = $state<QueueDto | null>(null);
   let models = $state<ModelEntry[]>([]);
   let dropdownOpen = $state(false);
+  // 可用性掃描
+  let scanning = $state(false);
+  let scanProgress = $state<{ done: number; total: number } | null>(null);
+  // 預設只顯示可用模型(你的 Claude 帳號 + 免費);切換顯示全部
+  let showAll = $state(false);
   let listening = $state(false);
   let transient = $state("");
   let transientTimer: number | undefined;
@@ -85,6 +90,7 @@
       hIndex = -1;
       dropdownOpen = false;
       attachments = [];
+      scanProgress = null;
       stopListening();
       refresh();
       refreshQueue();
@@ -92,6 +98,22 @@
     });
     const unlistenQueue = listen("queue-changed", () => {
       refreshQueue();
+    });
+    // 掃描進度:後端對每個模型探測後 emit;結束時 scan-done 帶統計
+    const unlistenScanProgress = listen<{ done: number; total: number }>("scan-progress", (e) => {
+      scanProgress = { done: e.payload.done, total: e.payload.total };
+    });
+    const unlistenScanDone = listen<{
+      free: number;
+      subscription: number;
+      broken: number;
+      scanned: number;
+      skipped: number;
+    }>("scan-done", (e) => {
+      scanning = false;
+      scanProgress = null;
+      showTransient(S.modelScanDone(e.payload));
+      refreshModels();
     });
     // busy(任務送出中)時不自動隱藏 — 避免提交瞬間失焦把面板關掉
     const onBlur = () => {
@@ -115,6 +137,8 @@
     return () => {
       unlistenShown.then((f) => f());
       unlistenQueue.then((f) => f());
+      unlistenScanProgress.then((f) => f());
+      unlistenScanDone.then((f) => f());
       window.removeEventListener("blur", onBlur);
       ro.disconnect();
       clearTimeout(transientTimer);
@@ -247,6 +271,19 @@
     }
   }
 
+  // A-Z 排序,但 claude(anthropic)永遠置頂 — localeCompare 會把 "claude"
+  // 按字串排到中間,因此先抽出 claude、其餘排序後再前插。
+  function sortModels(list: ModelEntry[]): ModelEntry[] {
+    const claude = list.filter((m) => m.name === "claude");
+    const rest = list.filter((m) => m.name !== "claude").sort((a, b) => a.name.localeCompare(b.name));
+    return [...claude, ...rest];
+  }
+
+  async function refreshModels() {
+    const list = await api.listModelsUi();
+    models = sortModels(list);
+  }
+
   async function toggleDropdown() {
     if (dropdownOpen) {
       dropdownOpen = false;
@@ -254,11 +291,25 @@
     }
     error = "";
     try {
-      const list = await api.listModelsUi();
-      models = list.sort((a, b) => a.name.localeCompare(b.name));
+      await refreshModels();
       dropdownOpen = true;
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  async function scan() {
+    if (scanning) return;
+    error = "";
+    scanning = true;
+    scanProgress = null;
+    try {
+      // 結束統計與列表刷新由 "scan-done" 事件處理;此處只兜底錯誤。
+      await api.scanModels();
+    } catch (e) {
+      error = String(e);
+      scanning = false;
+      scanProgress = null;
     }
   }
 
@@ -316,7 +367,19 @@
     subscription: S.tierSubscription,
     unknown: S.tierUnknown,
     anthropic: S.tierAnthropic,
+    broken: S.tierBroken,
   };
+
+  // ✓ 以設定檔的 model 為準(offline 時 status.model 可能不可靠),退回 status?.model
+  const currentModel = $derived(settings?.model || status?.model);
+
+  // 預設只顯示「可用」模型(你的 Claude 帳號 + 免費);顯示全部時不過濾。
+  // 目前選中的模型一律保留可見,即使被篩掉。
+  const visibleModels = $derived(
+    showAll
+      ? models
+      : models.filter((m) => m.tier === "anthropic" || m.tier === "free" || m.name === currentModel),
+  );
 
   // claude 哨符在選單顯示成易讀名稱
   function modelLabel(name: string): string {
@@ -326,9 +389,6 @@
   const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
 
   const micTip = S.micTooltip();
-
-  // ✓ 以設定檔的 model 為準(offline 時 status.model 可能不可靠),退回 status?.model
-  const currentModel = $derived(settings?.model || status?.model);
 </script>
 
 <svelte:window onkeydown={onGlobalKey} />
@@ -423,7 +483,20 @@
 
   {#if dropdownOpen}
     <div class="dropdown" bind:this={dropdownEl}>
-      {#each models as m (m.name)}
+      <div class="dhead">
+        <button class="scan" onclick={scan} disabled={scanning} title={S.modelOnlyUsable}>
+          {#if scanning}
+            {scanProgress ? S.modelScanning(scanProgress.done, scanProgress.total) : S.modelScan}
+          {:else}
+            {S.modelScan}
+          {/if}
+        </button>
+        <label class="showall">
+          <input type="checkbox" bind:checked={showAll} />
+          {S.modelShowAll}
+        </label>
+      </div>
+      {#each visibleModels as m (m.name)}
         <button class="opt" onclick={() => pickModel(m.name)}>
           <span class="check">{m.name === currentModel ? "✓" : ""}</span>
           <span class="name">{modelLabel(m.name)}</span>
@@ -701,5 +774,48 @@
   .badge.anthropic {
     color: #c8a2ff;
     background: rgba(200, 162, 255, 0.15);
+  }
+  .badge.broken {
+    color: #f7768e;
+    background: rgba(247, 118, 142, 0.12);
+  }
+  .dhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 6px 6px;
+    border-bottom: 1px solid var(--panel-border);
+    margin-bottom: 4px;
+  }
+  .scan {
+    border: 1px solid var(--panel-border);
+    background: var(--panel-bg);
+    color: #ccc;
+    font-size: 12px;
+    border-radius: 6px;
+    padding: 3px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .scan:hover:not(:disabled) {
+    border-color: #7aa2f7;
+    color: #eee;
+  }
+  .scan:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .showall {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #aaa;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .showall input {
+    cursor: pointer;
   }
 </style>

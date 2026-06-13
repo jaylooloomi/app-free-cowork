@@ -94,8 +94,8 @@ pub fn get_settings(state: State<AppState>) -> Settings {
 }
 
 /// server-side overlay:以「目前記憶體設定」為底,只接受 UI 可編輯的 6 個欄位。
-/// history/signin_state/known_subscription_models 由後端在設定視窗開啟期間
-/// 持續更新(submit_prompt、tier learning、auth re-lock),不可被前端的舊快照蓋掉。
+/// history/signin_state/known_*_models 由後端在設定視窗開啟期間持續更新
+/// (submit_prompt、tier learning、被動學習、掃描、auth re-lock),不可被前端的舊快照蓋掉。
 fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
     Settings {
         hotkey: incoming.hotkey.clone(),
@@ -107,6 +107,8 @@ fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
         history: current.history.clone(),
         signin_state: current.signin_state.clone(),
         known_subscription_models: current.known_subscription_models.clone(),
+        known_free_models: current.known_free_models.clone(),
+        known_broken_models: current.known_broken_models.clone(),
     }
 }
 
@@ -509,6 +511,18 @@ fn handle_task_exit(
         return;
     }
     if code == 0 {
+        // 被動學習:exit 0 代表模型免費可用 —— 但只在「背景模式」採信。
+        // 前景是 `ollama launch` 包裝 claude 的退出碼,使用者關掉主控台或包裝器
+        // 遮蔽子程序錯誤都可能回 0(誤判);背景 -p 模式下模型 403/失敗時 claude
+        // 會以非零結束,所以 exit 0 才是可靠訊號。claude(Anthropic 帳號)不適用。
+        if is_background && model != catalog::CLAUDE_MODEL {
+            let state = app.state::<AppState>();
+            let mut st = state.settings.lock().unwrap();
+            if !st.known_free_models.iter().any(|m| m == model) {
+                st.known_free_models.push(model.to_string());
+                let _ = settings::save(&settings::settings_path(), &st);
+            }
+        }
         if is_background {
             crate::notify(app, "任務完成");
         }
@@ -755,15 +769,25 @@ pub struct ModelEntry {
     pub tier: String,
 }
 
-/// "anthropic":claude 哨符(用 Anthropic 帳號);"free":實證免費名單;
-/// "subscription":執行時學到要訂閱;其餘 "unknown"。
-fn compute_tier(name: &str, known_subscription: &[String]) -> &'static str {
+/// tier 來自五個來源,依此優先序判定:
+/// "anthropic":claude 哨符(用 Anthropic 帳號,永不探測);
+/// "broken":掃描學到「無法使用」(優先於 free,避免 learned-broken 被遮蓋);
+/// "subscription":實證訂閱名單或執行時/掃描學到要訂閱;
+/// "free":實證免費名單或被動學習/掃描學到免費;其餘 "unknown"。
+fn compute_tier(
+    name: &str,
+    known_subscription: &[String],
+    known_free: &[String],
+    known_broken: &[String],
+) -> &'static str {
     if name == catalog::CLAUDE_MODEL {
         "anthropic"
-    } else if catalog::VERIFIED_FREE.contains(&name) {
-        "free"
-    } else if known_subscription.iter().any(|m| m == name) {
+    } else if known_broken.iter().any(|m| m == name) {
+        "broken"
+    } else if catalog::VERIFIED_SUBSCRIPTION.contains(&name) || known_subscription.iter().any(|m| m == name) {
         "subscription"
+    } else if catalog::VERIFIED_FREE.contains(&name) || known_free.iter().any(|m| m == name) {
+        "free"
     } else {
         "unknown"
     }
@@ -771,9 +795,14 @@ fn compute_tier(name: &str, known_subscription: &[String]) -> &'static str {
 
 #[tauri::command]
 pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
-    let (current, known) = {
+    let (current, known_sub, known_free, known_broken) = {
         let s = state.settings.lock().unwrap();
-        (s.model.clone(), s.known_subscription_models.clone())
+        (
+            s.model.clone(),
+            s.known_subscription_models.clone(),
+            s.known_free_models.clone(),
+            s.known_broken_models.clone(),
+        )
     };
     let cat = state.catalog_cache.lock().unwrap().clone();
     // 離線/尚未抓到目錄時至少回傳目前設定的模型
@@ -788,7 +817,7 @@ pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
             .into_iter()
             .filter(|n| n != catalog::CLAUDE_MODEL)
             .map(|name| {
-                let tier = compute_tier(&name, &known).to_string();
+                let tier = compute_tier(&name, &known_sub, &known_free, &known_broken).to_string();
                 ModelEntry { name, tier }
             }),
     );
@@ -804,6 +833,166 @@ pub async fn set_model(_app: AppHandle, state: State<'_, AppState>, name: String
     let mut s = state.settings.lock().unwrap();
     s.model = name;
     settings::save(&settings::settings_path(), &s).map_err(|e| e.to_string())
+}
+
+// ---------- v1.1: on-demand availability scan ----------
+
+pub const OLLAMA_CHAT_URL: &str = "http://127.0.0.1:11434/api/chat";
+
+#[derive(serde::Serialize)]
+pub struct ScanSummary {
+    pub free: usize,
+    pub subscription: usize,
+    pub broken: usize,
+    pub scanned: usize,
+    pub skipped: usize,
+}
+
+/// 把 /api/chat 探測結果映射成 tier:200=免費、403=需訂閱、其餘 HTTP 狀態=無法使用。
+/// 連線錯誤(transport Err)回 None —— 代表「測不到」(多半是 Ollama 沒開),
+/// 不可寫入 known_broken(否則暫時斷線會永久汙染快取),維持 unknown 待重掃。
+fn classify_probe(result: Result<u16, String>) -> Option<&'static str> {
+    match result {
+        Ok(200) => Some("free"),
+        Ok(403) => Some("subscription"),
+        Ok(_) => Some("broken"),
+        Err(_) => None,
+    }
+}
+
+/// /api/chat 探測用的最小請求 body(num_predict:1 只要 1 個 token,省額度)。
+/// 用 serde_json 組,安全跳脫模型名稱。
+fn probe_body(model: &str) -> String {
+    serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "hi" }],
+        "stream": false,
+        "options": { "num_predict": 1 }
+    })
+    .to_string()
+}
+
+/// dedupe push:不存在才加入。
+fn push_unique(list: &mut Vec<String>, model: &str) {
+    if !list.iter().any(|m| m == model) {
+        list.push(model.to_string());
+    }
+}
+
+/// 把模型從某個名單移除(重分類時用)。
+fn remove_from(list: &mut Vec<String>, model: &str) {
+    list.retain(|m| m != model);
+}
+
+/// 主動掃描:對目錄中 tier 仍為 "unknown" 的模型逐一探測 /api/chat,
+/// 依 200/403/其餘 分類成 free/subscription/broken 寫回設定。
+/// 探測在 spawn_blocking 內進行(不可橫跨 await 持有 State),先把需要的資料
+/// clone 出來,探完再鎖 settings 合併+存檔一次。進度經由 cloned AppHandle
+/// emit "scan-progress",結束 emit "scan-done"。
+#[tauri::command]
+pub async fn scan_models(app: AppHandle, state: State<'_, AppState>) -> Result<ScanSummary, String> {
+    // (1) 快照目錄 + 目前的 known_* 名單(鎖外探測前先 clone)
+    let catalog_models = state.catalog_cache.lock().unwrap().clone();
+    let (known_sub, known_free, known_broken) = {
+        let s = state.settings.lock().unwrap();
+        (
+            s.known_subscription_models.clone(),
+            s.known_free_models.clone(),
+            s.known_broken_models.clone(),
+        )
+    };
+    // (2) 目標 = 目錄中 tier 仍為 "unknown" 的模型(跳過 claude / 已分類者)
+    let total = catalog_models.len();
+    let targets: Vec<String> = catalog_models
+        .into_iter()
+        .filter(|n| n != catalog::CLAUDE_MODEL)
+        .filter(|n| compute_tier(n, &known_sub, &known_free, &known_broken) == "unknown")
+        .collect();
+    let skipped = total - targets.len();
+    let target_total = targets.len();
+
+    // (3) 在 spawn_blocking 內逐一 pull + probe + 分類 + emit 進度
+    let app2 = app.clone();
+    let results: Vec<(String, &'static str)> = tauri::async_runtime::spawn_blocking(move || {
+        use crate::command::Runner as _;
+        use crate::http::Http as _;
+        let runner = SystemRunner;
+        let http = UreqHttp;
+        let mut out: Vec<(String, &'static str)> = Vec::with_capacity(target_total);
+        for (i, model) in targets.into_iter().enumerate() {
+            // pull 先註冊雲端 stub(忽略結果);60s 上限
+            let _ = runner.run("ollama", &["pull", &model], std::time::Duration::from_secs(60));
+            let status = http.post_status(OLLAMA_CHAT_URL, &probe_body(&model), std::time::Duration::from_secs(60));
+            let is_transport_err = status.is_err();
+            let tier = classify_probe(status);
+            // 第一個就連不上 → Ollama 多半沒開,直接中止(不寫入任何 broken)
+            if is_transport_err && out.is_empty() {
+                return Err("Ollama 服務未回應,請先確認 Ollama 已啟動後再掃描".to_string());
+            }
+            // 連線錯誤(None)= 測不到,跳過不寫入;只有確定的 HTTP 結果才記錄
+            if let Some(tier) = tier {
+                out.push((model.clone(), tier));
+            }
+            if let Some(w) = app2.get_webview_window("palette") {
+                let _ = w.emit(
+                    "scan-progress",
+                    serde_json::json!({
+                        "done": i + 1,
+                        "total": target_total,
+                        "model": model,
+                        "result": tier.unwrap_or("error")
+                    }),
+                );
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // (4) 合併回設定(dedupe;重分類時從另外兩個名單移除),存檔一次
+    let mut summary = ScanSummary { free: 0, subscription: 0, broken: 0, scanned: results.len(), skipped };
+    {
+        let mut s = state.settings.lock().unwrap();
+        for (model, tier) in &results {
+            match *tier {
+                "free" => {
+                    remove_from(&mut s.known_subscription_models, model);
+                    remove_from(&mut s.known_broken_models, model);
+                    push_unique(&mut s.known_free_models, model);
+                    summary.free += 1;
+                }
+                "subscription" => {
+                    remove_from(&mut s.known_free_models, model);
+                    remove_from(&mut s.known_broken_models, model);
+                    push_unique(&mut s.known_subscription_models, model);
+                    summary.subscription += 1;
+                }
+                _ => {
+                    remove_from(&mut s.known_free_models, model);
+                    remove_from(&mut s.known_subscription_models, model);
+                    push_unique(&mut s.known_broken_models, model);
+                    summary.broken += 1;
+                }
+            }
+        }
+        settings::save(&settings::settings_path(), &s).map_err(|e| e.to_string())?;
+    }
+
+    // (5) 通知前端掃描完成(前端據此重抓 list_models_ui)
+    if let Some(w) = app.get_webview_window("palette") {
+        let _ = w.emit(
+            "scan-done",
+            serde_json::json!({
+                "free": summary.free,
+                "subscription": summary.subscription,
+                "broken": summary.broken,
+                "scanned": summary.scanned,
+                "skipped": summary.skipped
+            }),
+        );
+    }
+    Ok(summary)
 }
 
 /// webview 不得開任意網址 — 僅允許白名單(完全比對)。
@@ -1111,6 +1300,8 @@ mod tests {
             history: vec!["真實歷史".into()],
             signin_state: SigninState::Yes,
             known_subscription_models: vec!["minimax-m2.7:cloud".into()],
+            known_free_models: vec!["gemma3:4b-cloud".into()],
+            known_broken_models: vec!["dead:cloud".into()],
             ..Default::default()
         };
         let incoming = Settings {
@@ -1124,6 +1315,8 @@ mod tests {
             history: vec!["stale".into()],
             signin_state: SigninState::No,
             known_subscription_models: vec!["stale:cloud".into()],
+            known_free_models: vec!["stale-free:cloud".into()],
+            known_broken_models: vec!["stale-broken:cloud".into()],
         };
         let merged = overlay_ui_fields(&current, &incoming);
         assert_eq!(merged.hotkey, "Ctrl+Alt+Space");
@@ -1138,6 +1331,16 @@ mod tests {
             merged.known_subscription_models,
             vec!["minimax-m2.7:cloud".to_string()],
             "tier learning 以記憶體為準"
+        );
+        assert_eq!(
+            merged.known_free_models,
+            vec!["gemma3:4b-cloud".to_string()],
+            "被動學習的免費名單以記憶體為準"
+        );
+        assert_eq!(
+            merged.known_broken_models,
+            vec!["dead:cloud".to_string()],
+            "掃描到的無法使用名單以記憶體為準"
         );
     }
 
@@ -1172,17 +1375,68 @@ mod tests {
     }
 
     #[test]
-    fn compute_tier_free_subscription_unknown() {
-        let known = vec!["minimax-m2.7:cloud".to_string()];
-        assert_eq!(compute_tier("minimax-m2.5:cloud", &known), "free");
-        assert_eq!(compute_tier("qwen3-coder-next:cloud", &known), "free");
-        assert_eq!(compute_tier("glm-4.7:cloud", &known), "free");
-        assert_eq!(compute_tier("minimax-m2.7:cloud", &known), "subscription");
-        assert_eq!(compute_tier("gpt-oss:120b-cloud", &known), "unknown");
-        assert_eq!(compute_tier("claude", &known), "anthropic");
-        // 同時在兩邊時以實證免費為準
-        let conflict = vec!["minimax-m2.5:cloud".to_string()];
-        assert_eq!(compute_tier("minimax-m2.5:cloud", &conflict), "free");
+    fn compute_tier_free_subscription_broken_unknown() {
+        let none: Vec<String> = vec![];
+        // 實證免費名單
+        assert_eq!(compute_tier("minimax-m2.5:cloud", &none, &none, &none), "free");
+        assert_eq!(compute_tier("qwen3-coder-next:cloud", &none, &none, &none), "free");
+        assert_eq!(compute_tier("glm-4.7:cloud", &none, &none, &none), "free");
+        assert_eq!(compute_tier("gemma4:31b-cloud", &none, &none, &none), "free");
+        assert_eq!(compute_tier("gpt-oss:120b-cloud", &none, &none, &none), "free");
+        // 實證訂閱名單(VERIFIED_SUBSCRIPTION)
+        assert_eq!(compute_tier("deepseek-v3.2:cloud", &none, &none, &none), "subscription");
+        assert_eq!(compute_tier("minimax-m2.7:cloud", &none, &none, &none), "subscription");
+        // 學到的訂閱模型
+        let known_sub = vec!["custom-sub:cloud".to_string()];
+        assert_eq!(compute_tier("custom-sub:cloud", &known_sub, &none, &none), "subscription");
+        // 被動學習/掃描學到的免費模型
+        let known_free = vec!["learned-free:cloud".to_string()];
+        assert_eq!(compute_tier("learned-free:cloud", &none, &known_free, &none), "free");
+        // 掃描學到的無法使用模型
+        let known_broken = vec!["dead:cloud".to_string()];
+        assert_eq!(compute_tier("dead:cloud", &none, &none, &known_broken), "broken");
+        // 完全未知
+        assert_eq!(compute_tier("nobody-knows:cloud", &none, &none, &none), "unknown");
+        // claude 哨符
+        assert_eq!(compute_tier("claude", &none, &none, &none), "anthropic");
+        // 優先序:broken 蓋過 free(learned-broken 不被實證免費遮蓋)
+        let broken_qwen = vec!["qwen3-coder-next:cloud".to_string()];
+        assert_eq!(compute_tier("qwen3-coder-next:cloud", &none, &none, &broken_qwen), "broken");
+        // 優先序:subscription 蓋過 free
+        let sub_qwen = vec!["qwen3-coder-next:cloud".to_string()];
+        assert_eq!(compute_tier("qwen3-coder-next:cloud", &sub_qwen, &none, &none), "subscription");
+    }
+
+    #[test]
+    fn classify_probe_maps_status_to_tier() {
+        assert_eq!(classify_probe(Ok(200)), Some("free"));
+        assert_eq!(classify_probe(Ok(403)), Some("subscription"));
+        assert_eq!(classify_probe(Ok(500)), Some("broken"));
+        assert_eq!(classify_probe(Ok(404)), Some("broken"));
+        // 連線錯誤不得分類成 broken(會永久汙染快取);回 None 維持 unknown 待重掃
+        assert_eq!(classify_probe(Err("connection refused".into())), None);
+    }
+
+    #[test]
+    fn probe_body_escapes_model_name_and_limits_tokens() {
+        let body = probe_body(r#"weird"name:cloud"#);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["model"], r#"weird"name:cloud"#);
+        assert_eq!(v["stream"], false);
+        assert_eq!(v["options"]["num_predict"], 1);
+        assert_eq!(v["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn push_unique_and_remove_from_dedupe_and_reclassify() {
+        let mut list = vec!["a:cloud".to_string()];
+        push_unique(&mut list, "a:cloud"); // already present → no dup
+        push_unique(&mut list, "b:cloud");
+        assert_eq!(list, vec!["a:cloud".to_string(), "b:cloud".to_string()]);
+        remove_from(&mut list, "a:cloud");
+        assert_eq!(list, vec!["b:cloud".to_string()]);
+        remove_from(&mut list, "missing:cloud"); // no-op
+        assert_eq!(list, vec!["b:cloud".to_string()]);
     }
 
     #[test]

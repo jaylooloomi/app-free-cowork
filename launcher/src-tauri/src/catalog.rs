@@ -13,21 +13,31 @@ pub fn parse_cloud_models(api_tags_json: &str) -> Option<Vec<String>> {
 }
 
 /// Fallback chain when the configured model leaves the catalog. Free-tier
-/// access verified empirically (2026-06-12/13). qwen3-vl is vision-capable so
-/// pasted images work; qwen3-coder-next is the lighter agentic specialist.
-/// minimax-m2.7 / qwen3.5 are subscription-gated (HTTP 403) — never default to them.
-pub const FALLBACKS: [&str; 2] = ["qwen3-vl:235b-cloud", "qwen3-coder-next:cloud"];
+/// access verified empirically (2026-06-12/13). Default is minimax-m2.5 — light
+/// on the GPU-time free quota; qwen3-coder-next is the agentic fallback. For
+/// images switch to a vision model (qwen3-vl) via the picker. minimax-m2.7 /
+/// qwen3.5 are subscription-gated (HTTP 403) — never default to them.
+pub const FALLBACKS: [&str; 2] = ["minimax-m2.5:cloud", "qwen3-coder-next:cloud"];
 pub const CATALOG_URL: &str = "https://ollama.com/api/tags";
 
-/// Models empirically verified to respond on the free plan (2026-06-12/13).
+/// Models empirically verified to respond on the free plan (scanned 2026-06-13).
 /// Used by the model picker to label tiers; anything not listed here and not
 /// learned as subscription-gated at runtime is shown as "unknown".
-pub const VERIFIED_FREE: [&str; 5] = [
-    "qwen3-vl:235b-cloud",
-    "qwen3-coder-next:cloud",
-    "qwen3-next:80b-cloud",
-    "minimax-m2.5:cloud",
-    "glm-4.7:cloud",
+pub const VERIFIED_FREE: [&str; 21] = [
+    "qwen3-vl:235b-cloud", "qwen3-vl:235b-instruct-cloud", "qwen3-coder-next:cloud",
+    "qwen3-next:80b-cloud", "qwen3-coder:480b-cloud", "minimax-m2.5:cloud", "glm-4.7:cloud",
+    "gpt-oss:120b-cloud", "gpt-oss:20b-cloud", "gemma3:4b-cloud", "gemma3:12b-cloud",
+    "gemma3:27b-cloud", "gemma4:31b-cloud", "ministral-3:3b-cloud", "ministral-3:8b-cloud",
+    "ministral-3:14b-cloud", "devstral-2:123b-cloud", "devstral-small-2:24b-cloud",
+    "cogito-2.1:671b-cloud", "nemotron-3-nano:30b-cloud", "rnj-1:8b-cloud",
+];
+
+/// Models empirically verified to be subscription-gated (HTTP 403 "requires a
+/// subscription"; scanned 2026-06-13). The picker labels these "需訂閱" and the
+/// default filter hides them.
+pub const VERIFIED_SUBSCRIPTION: [&str; 7] = [
+    "minimax-m2.7:cloud", "qwen3.5:397b-cloud", "deepseek-v3.1:671b-cloud",
+    "deepseek-v3.2:cloud", "glm-5:cloud", "kimi-k2:1t-cloud", "mistral-large-3:675b-cloud",
 ];
 
 /// 特殊哨符:用使用者自己的 Anthropic 帳號直接跑真正的 Claude(不經 Ollama)。
@@ -70,9 +80,9 @@ mod tests {
         let cat: Vec<String> = vec!["minimax-m2.5:cloud".into(), "qwen3-coder-next:cloud".into(), "glm-5:cloud".into()];
         let (m, notice) = choose_model("minimax-m2.5:cloud", &cat);
         assert_eq!(m, "minimax-m2.5:cloud"); assert!(notice.is_none());
-        // FALLBACKS[0] (qwen3-vl) not in this catalog → falls to FALLBACKS[1] qwen3-coder-next
+        // FALLBACKS[0] (minimax-m2.5) is in this catalog → picked
         let (m, notice) = choose_model("dead-model:cloud", &cat);
-        assert_eq!(m, "qwen3-coder-next:cloud"); assert!(notice.is_some());
+        assert_eq!(m, "minimax-m2.5:cloud"); assert!(notice.is_some());
         let cat2: Vec<String> = vec!["glm-5:cloud".into()];
         let (m, notice) = choose_model("dead-model:cloud", &cat2);
         assert_eq!(m, "glm-5:cloud"); assert!(notice.is_some());

@@ -38,7 +38,15 @@ export interface QueueDto {
 
 export interface ModelEntry {
   name: string;
-  tier: "free" | "subscription" | "unknown" | "anthropic";
+  tier: "free" | "subscription" | "unknown" | "anthropic" | "broken";
+}
+
+export interface ScanSummary {
+  free: number;
+  subscription: number;
+  broken: number;
+  scanned: number;
+  skipped: number;
 }
 
 export interface StepResult {
@@ -63,6 +71,8 @@ export const api = {
   taskStop: () => invoke<void>("task_stop"),
   listModelsUi: () => invoke<ModelEntry[]>("list_models_ui"),
   setModel: (name: string) => invoke<void>("set_model", { name }),
+  /** 主動掃描目錄中未知 tier 的模型,回傳統計。進度經由 "scan-progress" 事件、結束經由 "scan-done"。 */
+  scanModels: () => invoke<ScanSummary>("scan_models"),
   /** 僅白名單網址(ollama.com/settings、ollama.com/upgrade)。 */
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   /** 後端會聚焦面板並送出 Win+H 啟動 Windows 語音輸入。 */

@@ -19,6 +19,10 @@ pub struct Settings {
     /// 執行時學到「需要付費訂閱」的模型(403 requires a subscription)。
     /// 模型選單據此標示 tier;serde default 讓舊設定檔可無痛升級。
     pub known_subscription_models: Vec<String>,
+    /// 學到/掃描到「免費可用」的模型(200 OK)。被動學習與主動掃描都會寫入。
+    pub known_free_models: Vec<String>,
+    /// 掃描到「無法使用」的模型(非 403 的錯誤,如不存在/暫時故障)。
+    pub known_broken_models: Vec<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -32,6 +36,8 @@ impl Default for Settings {
             history: Vec::new(),
             signin_state: SigninState::Unknown,
             known_subscription_models: Vec::new(),
+            known_free_models: Vec::new(),
+            known_broken_models: Vec::new(),
         }
     }
 }
@@ -93,7 +99,7 @@ mod tests {
     fn defaults_are_per_spec() {
         let s = Settings::default();
         assert_eq!(s.hotkey, "Alt+H");
-        assert_eq!(s.model, "qwen3-vl:235b-cloud");
+        assert_eq!(s.model, "minimax-m2.5:cloud");
         assert!(!s.cautious_mode);
         assert!(!s.background_mode);
         assert_eq!(s.working_dir, "");
@@ -125,7 +131,7 @@ mod tests {
         std::fs::write(&p, r#"{"hotkey":"Ctrl+Alt+Space"}"#).unwrap();
         let partial = load(&p);
         assert_eq!(partial.hotkey, "Ctrl+Alt+Space");
-        assert_eq!(partial.model, "qwen3-vl:235b-cloud");
+        assert_eq!(partial.model, "minimax-m2.5:cloud");
         assert!(partial.known_subscription_models.is_empty(), "v1 settings without the field must default to empty");
     }
     #[test]
