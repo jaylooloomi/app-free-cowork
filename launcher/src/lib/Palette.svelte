@@ -212,9 +212,15 @@
     attachments = attachments.filter((_, idx) => idx !== i);
   }
 
-  // Escape 走全域(svelte:window)— 不管焦點在哪都能關閉選單/面板,並處理層級:
-  // 選單開啟時先關選單,再按一次才隱藏面板。
+  // 全域鍵(svelte:window)— 不管焦點在哪都生效:
+  // Alt+J 啟動語音輸入(面板開著時的專屬語音鍵;Alt+H 仍是開/關面板)。
+  // Escape:選單開啟時先關選單,再按一次才隱藏面板。
   function onGlobalKey(e: KeyboardEvent) {
+    if (e.altKey && (e.key === "j" || e.key === "J")) {
+      e.preventDefault();
+      if (!busy && !offline) onMic();
+      return;
+    }
     if (e.key !== "Escape") return;
     if (dropdownOpen) {
       dropdownOpen = false;
