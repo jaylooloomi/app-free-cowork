@@ -141,6 +141,32 @@ pub async fn save_settings(app: AppHandle, state: State<'_, AppState>, new_setti
 #[tauri::command]
 pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<StatusDto, String> {
     let s = state.settings.lock().unwrap().clone();
+
+    // claude(Anthropic 帳號)路徑:完全不碰 Ollama,只看 claude.exe 是否安裝。
+    if s.model == catalog::CLAUDE_MODEL {
+        let claude_status = tauri::async_runtime::spawn_blocking(|| {
+            let runner = SystemRunner;
+            let http = UreqHttp;
+            (doctor::claude_check(&prod_deps(&runner, &http)), doctor::claude_authed())
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let (state_str, detail) = match claude_status {
+            (doctor::Status::Ready, true) => ("ready", String::new()),
+            (doctor::Status::Ready, false) => {
+                ("ready", "尚未登入 Anthropic — 首次執行會在終端機要求 /login".to_string())
+            }
+            (doctor::Status::Degraded { reason }, _) => ("degraded", reason),
+            _ => ("degraded", "Claude 狀態未知".to_string()),
+        };
+        return Ok(StatusDto {
+            state: state_str.into(),
+            model: catalog::CLAUDE_MODEL.into(),
+            detail,
+            plan: None,
+        });
+    }
+
     let cat = state.catalog_cache.lock().unwrap().clone();
     let cache_empty = cat.is_empty();
     // 帳號方案:回傳快取值;尚未取得時非阻塞地觸發一次抓取(下次輪詢就有)
@@ -237,12 +263,35 @@ pub async fn submit_prompt(app: AppHandle, state: State<'_, AppState>, prompt: S
     if prompt.is_empty() {
         return Err("請輸入需求".into());
     }
-    let signin_no;
+    let (signin_no, is_claude);
     {
         let mut s = state.settings.lock().unwrap();
         s.push_history(&prompt);
         let _ = settings::save(&settings::settings_path(), &s);
         signin_no = s.signin_state == SigninState::No;
+        is_claude = s.model == catalog::CLAUDE_MODEL;
+    }
+    // claude(Anthropic 帳號)路徑:跳過 Ollama signin/wizard,只確認 claude.exe 在。
+    if is_claude {
+        let status = tauri::async_runtime::spawn_blocking(|| {
+            let runner = SystemRunner;
+            let http = UreqHttp;
+            doctor::claude_check(&prod_deps(&runner, &http))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        return match status {
+            doctor::Status::Degraded { reason } => Err(reason),
+            _ => {
+                *state.pending_prompt.lock().unwrap() = None;
+                let task = new_task(&state, prompt);
+                let outcome = launch_or_enqueue(&app, task)?;
+                if outcome == "launched" {
+                    hide_window(&app, "palette");
+                }
+                Ok(outcome.into())
+            }
+        };
     }
     // 登入已失效 → 重新走精靈(auth re-onboarding)
     if signin_no {
@@ -706,9 +755,12 @@ pub struct ModelEntry {
     pub tier: String,
 }
 
-/// "free":實證免費名單;"subscription":執行時學到要訂閱;其餘 "unknown"。
+/// "anthropic":claude 哨符(用 Anthropic 帳號);"free":實證免費名單;
+/// "subscription":執行時學到要訂閱;其餘 "unknown"。
 fn compute_tier(name: &str, known_subscription: &[String]) -> &'static str {
-    if catalog::VERIFIED_FREE.contains(&name) {
+    if name == catalog::CLAUDE_MODEL {
+        "anthropic"
+    } else if catalog::VERIFIED_FREE.contains(&name) {
         "free"
     } else if known_subscription.iter().any(|m| m == name) {
         "subscription"
@@ -726,13 +778,21 @@ pub fn list_models_ui(state: State<AppState>) -> Vec<ModelEntry> {
     let cat = state.catalog_cache.lock().unwrap().clone();
     // 離線/尚未抓到目錄時至少回傳目前設定的模型
     let names = if cat.is_empty() { vec![current] } else { cat };
-    names
-        .into_iter()
-        .map(|name| {
-            let tier = compute_tier(&name, &known).to_string();
-            ModelEntry { name, tier }
-        })
-        .collect()
+    // claude(Anthropic 帳號)永遠置頂,且不論目錄是否抓到都列出
+    let mut entries = vec![ModelEntry {
+        name: catalog::CLAUDE_MODEL.to_string(),
+        tier: "anthropic".to_string(),
+    }];
+    entries.extend(
+        names
+            .into_iter()
+            .filter(|n| n != catalog::CLAUDE_MODEL)
+            .map(|name| {
+                let tier = compute_tier(&name, &known).to_string();
+                ModelEntry { name, tier }
+            }),
+    );
+    entries
 }
 
 #[tauri::command]
@@ -1119,6 +1179,7 @@ mod tests {
         assert_eq!(compute_tier("glm-4.7:cloud", &known), "free");
         assert_eq!(compute_tier("minimax-m2.7:cloud", &known), "subscription");
         assert_eq!(compute_tier("gpt-oss:120b-cloud", &known), "unknown");
+        assert_eq!(compute_tier("claude", &known), "anthropic");
         // 同時在兩邊時以實證免費為準
         let conflict = vec!["minimax-m2.5:cloud".to_string()];
         assert_eq!(compute_tier("minimax-m2.5:cloud", &conflict), "free");

@@ -315,7 +315,13 @@
     free: S.tierFree,
     subscription: S.tierSubscription,
     unknown: S.tierUnknown,
+    anthropic: S.tierAnthropic,
   };
+
+  // claude 哨符在選單顯示成易讀名稱
+  function modelLabel(name: string): string {
+    return name === "claude" ? "Claude(Anthropic 官方)" : name;
+  }
 
   const hasQueue = $derived(!!queue && (queue.running !== null || queue.queued.length > 0));
 
@@ -410,7 +416,7 @@
         <button class="chip" onclick={openPlanPage} title={S.planTooltip}>{planLabel}</button>
       {/if}
       {#if status}
-        <button class="chip model" onclick={toggleDropdown}>{status.model} ▾</button>
+        <button class="chip model" onclick={toggleDropdown}>{modelLabel(status.model)} ▾</button>
       {/if}
     </div>
   </div>
@@ -420,7 +426,7 @@
       {#each models as m (m.name)}
         <button class="opt" onclick={() => pickModel(m.name)}>
           <span class="check">{m.name === currentModel ? "✓" : ""}</span>
-          <span class="name">{m.name}</span>
+          <span class="name">{modelLabel(m.name)}</span>
           <span class="badge {m.tier}">{tierLabels[m.tier]}</span>
         </button>
       {/each}
@@ -691,5 +697,9 @@
   .badge.unknown {
     color: #aaa;
     background: rgba(255, 255, 255, 0.08);
+  }
+  .badge.anthropic {
+    color: #c8a2ff;
+    background: rgba(200, 162, 255, 0.15);
   }
 </style>

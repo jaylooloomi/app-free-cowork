@@ -38,7 +38,7 @@ export interface QueueDto {
 
 export interface ModelEntry {
   name: string;
-  tier: "free" | "subscription" | "unknown";
+  tier: "free" | "subscription" | "unknown" | "anthropic";
 }
 
 export interface StepResult {

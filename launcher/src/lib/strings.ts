@@ -39,6 +39,7 @@ export const S = {
   tierFree: "免費",
   tierSubscription: "需訂閱",
   tierUnknown: "未知",
+  tierAnthropic: "你的 Claude 帳號",
   planFree: "免費方案",
   planPro: "Pro",
   planMax: "Max",

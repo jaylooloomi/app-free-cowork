@@ -30,8 +30,16 @@ pub const VERIFIED_FREE: [&str; 5] = [
     "glm-4.7:cloud",
 ];
 
+/// 特殊哨符:用使用者自己的 Anthropic 帳號直接跑真正的 Claude(不經 Ollama)。
+/// 不是 Ollama 雲端目錄裡的模型,所以 choose_model / tier 都要特別處理。
+pub const CLAUDE_MODEL: &str = "claude";
+
 /// 回傳 (要用的模型, 若有改動的中文通知)。catalog 為空(離線/未取得)時不改動。
 pub fn choose_model(configured: &str, catalog: &[String]) -> (String, Option<String>) {
+    // claude 走 Anthropic 帳號、不在 Ollama 目錄裡 — 永遠原樣保留,不做 fallback。
+    if configured == CLAUDE_MODEL {
+        return (configured.to_string(), None);
+    }
     if catalog.is_empty() || catalog.iter().any(|c| c == configured) {
         return (configured.to_string(), None);
     }

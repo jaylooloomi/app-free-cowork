@@ -49,6 +49,30 @@ const PING_URL: &str = "http://127.0.0.1:11434/api/version";
 
 fn claude_installed(paths: &[PathBuf]) -> bool { paths.iter().any(|p| p.exists()) }
 
+/// claude 模型路徑用:是否已登入 Anthropic 帳號。
+/// ANTHROPIC_API_KEY 環境變數,或 ~/.claude.json 的 oauthAccount 存在即視為已登入。
+pub fn claude_authed() -> bool {
+    if std::env::var("ANTHROPIC_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+        return true;
+    }
+    let Some(home) = dirs::home_dir() else { return false };
+    let Ok(text) = std::fs::read_to_string(home.join(".claude.json")) else { return false };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("oauthAccount").map(|o| !o.is_null()))
+        .unwrap_or(false)
+}
+
+/// claude(Anthropic 帳號)路徑的體檢:只看 claude.exe 是否安裝,完全不碰 Ollama。
+/// 登入與否不阻擋送出 —— 前景模式 claude 自己會在終端機要求 /login。
+pub fn claude_check(deps: &Deps) -> Status {
+    if claude_installed(&deps.claude_paths) {
+        Status::Ready
+    } else {
+        Status::Degraded { reason: "尚未安裝 Claude Code(請先完成首次安裝)".into() }
+    }
+}
+
 enum OllamaState { Missing, TooOld, Ok }
 fn ollama_state(runner: &dyn Runner) -> OllamaState {
     match runner.run("ollama", &["--version"], Duration::from_secs(3)) {

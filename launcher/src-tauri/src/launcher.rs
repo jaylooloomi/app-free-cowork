@@ -9,7 +9,44 @@ pub struct LaunchSpec {
     pub background: bool,
 }
 
+/// claude 的執行檔路徑:優先 `%USERPROFILE%\.local\bin\claude.exe`,否則靠 PATH。
+fn claude_program() -> String {
+    if let Some(home) = dirs::home_dir() {
+        let p = home.join(".local").join("bin").join("claude.exe");
+        if p.exists() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    "claude".into()
+}
+
+/// 權限旗標:謹慎模式 → acceptEdits;否則 → dangerously-skip-permissions。
+fn permission_args(s: &Settings) -> Vec<String> {
+    if s.cautious_mode {
+        vec!["--permission-mode".into(), "acceptEdits".into()]
+    } else {
+        vec!["--dangerously-skip-permissions".into()]
+    }
+}
+
 pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec {
+    // claude 哨符 → 直接跑 claude(用 Anthropic 帳號),不經 ollama、不帶 --model、
+    // 不設 Ollama 環境變數。前景 = 互動;背景 = -p。
+    if model == crate::catalog::CLAUDE_MODEL {
+        let mut args: Vec<String> = Vec::new();
+        if s.background_mode {
+            args.push("-p".into());
+        }
+        args.extend(permission_args(s));
+        args.push(prompt.to_string());
+        return LaunchSpec {
+            program: claude_program(),
+            args,
+            cwd: s.effective_working_dir(),
+            background: s.background_mode,
+        };
+    }
+
     let mut args: Vec<String> = vec![
         "launch".into(),
         "claude".into(),
@@ -21,12 +58,7 @@ pub fn build_launch_spec(prompt: &str, s: &Settings, model: &str) -> LaunchSpec 
     if s.background_mode {
         args.push("-p".into());
     }
-    if s.cautious_mode {
-        args.push("--permission-mode".into());
-        args.push("acceptEdits".into());
-    } else {
-        args.push("--dangerously-skip-permissions".into());
-    }
+    args.extend(permission_args(s));
     args.push(prompt.to_string());
     LaunchSpec {
         program: "ollama".into(),
@@ -164,6 +196,33 @@ mod tests {
         let (code, elapsed) = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
         assert_eq!(code, 0);
         assert!(elapsed < std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn claude_model_runs_claude_directly_not_ollama() {
+        // 前景:claude "<prompt>" + 權限旗標,完全不經 ollama / --model
+        let s = Settings::default();
+        let spec = build_launch_spec("看這張圖", &s, crate::catalog::CLAUDE_MODEL);
+        assert_ne!(spec.program, "ollama");
+        assert!(
+            spec.program == "claude" || spec.program.ends_with("claude.exe"),
+            "program should be the claude binary, got {}",
+            spec.program
+        );
+        assert_eq!(spec.args, vec!["--dangerously-skip-permissions", "看這張圖"]);
+        assert!(!spec.args.iter().any(|a| a == "launch" || a == "--model"));
+    }
+
+    #[test]
+    fn claude_model_background_and_cautious() {
+        let bg = Settings { background_mode: true, ..Default::default() };
+        let spec = build_launch_spec("p", &bg, crate::catalog::CLAUDE_MODEL);
+        assert_eq!(spec.args, vec!["-p", "--dangerously-skip-permissions", "p"]);
+        assert!(spec.background);
+
+        let cautious = Settings { cautious_mode: true, ..Default::default() };
+        let spec = build_launch_spec("p", &cautious, crate::catalog::CLAUDE_MODEL);
+        assert_eq!(spec.args, vec!["--permission-mode", "acceptEdits", "p"]);
     }
 
     #[test]
