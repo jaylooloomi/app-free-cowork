@@ -1,3 +1,4 @@
+pub mod announce;
 pub mod bootstrap;
 pub mod catalog;
 pub mod command;
@@ -179,6 +180,52 @@ fn show_palette_centered(app: &AppHandle) {
     }
 }
 
+/// 顯示任務完成播報 overlay:定位到焦點螢幕下方中央,套上 WS_EX_NOACTIVATE
+/// (Tauri 的 focus flag 在 Windows 不可靠,用這個才能保證 show 不搶使用者焦點、
+/// 不打斷打字),點擊穿透,顯示但不 set_focus,並把摘要文字 emit 給前端朗讀。
+pub fn show_announcer(app: &AppHandle, text: &str) {
+    let Some(w) = app.get_webview_window("announcer") else {
+        return;
+    };
+    let rect = focused_monitor_rect().or_else(|| {
+        w.current_monitor()
+            .ok()
+            .flatten()
+            .map(|m| (*m.position(), *m.size()))
+    });
+    if let Some((mp, ms)) = rect {
+        let ws = w
+            .outer_size()
+            .unwrap_or(tauri::PhysicalSize { width: 600, height: 220 });
+        let _ = w.set_position(announce::bottom_centered_position(mp, ms, ws, 48));
+    }
+    #[cfg(windows)]
+    if let Ok(hwnd) = w.hwnd() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+        };
+        // 跨 windows-crate 版本安全地重建 HWND(Tauri 的 windows 版本未必等於本 crate)。
+        let h = HWND(hwnd.0 as _);
+        unsafe {
+            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | (WS_EX_NOACTIVATE.0 as isize));
+        }
+    }
+    let _ = w.set_ignore_cursor_events(true);
+    let _ = w.show();
+    // 故意不呼叫 set_focus():保持使用者原本的前景視窗持有鍵盤焦點。
+    let _ = w.emit("announce", serde_json::json!({ "text": text }));
+}
+
+/// 播報唸完/淡出後,前端呼叫此命令把 overlay 藏起來(下次播報再 show)。
+#[tauri::command]
+fn announcer_done(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("announcer") {
+        let _ = w.hide();
+    }
+}
+
 fn handle_argv(app: &AppHandle, argv: &[String]) {
     if let Some(i) = argv.iter().position(|a| a == "--run") {
         if let Some(prompt) = argv.get(i + 1) {
@@ -285,7 +332,8 @@ pub fn run() {
             ipc::effects_applied,
             ipc::save_pasted_image,
             ipc::capture_screenshot,
-            ipc::pick_folder
+            ipc::pick_folder,
+            announcer_done
         ])
         .on_window_event(|window, event| {
             // 三個視窗都只隱藏、永不關閉 — 否則 X 會銷毀視窗導致 app 結束
@@ -296,6 +344,10 @@ pub fn run() {
         })
         .setup(move |app| {
             if let Some(w) = app.get_webview_window("palette") {
+                fx::apply_palette_effects(&w);
+            }
+            // 播報 overlay 也套上 OS acrylic,讓玻璃面板後面的桌面模糊透出。
+            if let Some(w) = app.get_webview_window("announcer") {
                 fx::apply_palette_effects(&w);
             }
             let handle = app.handle().clone();

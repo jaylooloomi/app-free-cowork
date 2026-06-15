@@ -11,6 +11,12 @@
   let saved = $state(false);
   let error = $state("");
   let savedTimer: ReturnType<typeof setTimeout> | undefined;
+  let voices = $state<{ name: string; lang: string }[]>([]);
+  function loadVoices() {
+    const vs = window.speechSynthesis?.getVoices() ?? [];
+    const zh = vs.filter((v) => /^zh/i.test(v.lang));
+    voices = (zh.length ? zh : vs).map((v) => ({ name: v.name, lang: v.lang }));
+  }
 
   async function load() {
     s = await api.getSettings();
@@ -24,6 +30,8 @@
 
   onMount(() => {
     load();
+    loadVoices();
+    if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = loadVoices;
     // 視窗只隱藏不關閉 → 每次重新顯示時重新載入,避免顯示過期資料
     const unlisten = listen("settings-shown", () => {
       load();
@@ -54,6 +62,8 @@
         autostart: snap.autostart,
         locale: snap.locale,
         system_prompt: snap.system_prompt,
+        announce_enabled: snap.announce_enabled,
+        announce_voice: snap.announce_voice,
       };
       // 失敗(例:快捷鍵註冊失敗)→ 後端已回滾,顯示訊息,欄位保持可編輯重試
       await api.saveSettings(merged);
@@ -125,6 +135,22 @@
       ></textarea>
       <small>{S.settingsSystemPromptHint}</small></label
     >
+    <label class="row">
+      <input type="checkbox" bind:checked={s.announce_enabled} />
+      {s.locale === "en" ? "Speak task results aloud (glass overlay + voice)" : "任務完成時語音播報(玻璃 overlay + 朗讀)"}
+    </label>
+    <label>
+      {s.locale === "en" ? "Announcer voice" : "播報語音"}
+      <select bind:value={s.announce_voice}>
+        <option value="">{s.locale === "en" ? "Auto (system zh-TW)" : "自動(系統 zh-TW 語音)"}</option>
+        {#each voices as v (v.name)}<option value={v.name}>{v.name} ({v.lang})</option>{/each}
+      </select>
+      <small
+        >{s.locale === "en"
+          ? "WebView2 uses Microsoft voices (e.g. HsiaoChen); install a Chinese (Taiwan) voice in Windows if the list is empty."
+          : "WebView2 用 Microsoft 語音(如 HsiaoChen);清單若空,請到 Windows 設定安裝中文(台灣)語音。"}</small
+      >
+    </label>
     <div class="actions">
       <button class="primary" onclick={save}>{S.settingsSave}</button>
       <button onclick={openLogs}>{S.settingsOpenLogs}</button>

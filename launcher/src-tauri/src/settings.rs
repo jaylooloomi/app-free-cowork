@@ -33,6 +33,10 @@ pub struct Settings {
     /// 自訂「助手個性」系統提示;留空 = 使用內建的「動手型助手」預設(依語言)。
     /// 進階使用者可改寫,改變 AI 的行事風格。
     pub system_prompt: String,
+    /// 任務完成時是否語音播報(玻璃 overlay + TTS)。預設開;serde default 相容舊檔。
+    pub announce_enabled: bool,
+    /// 播報使用的語音名稱(對應 Web Speech 的 voice.name);留空 = 自動挑 zh-TW 語音。
+    pub announce_voice: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -54,6 +58,8 @@ impl Default for Settings {
             voice_hotkey: "Alt+J".into(),
             capture_hotkey: "Alt+K".into(),
             system_prompt: String::new(),
+            announce_enabled: true,
+            announce_voice: String::new(),
         }
     }
 }
@@ -124,6 +130,8 @@ mod tests {
         assert!(s.autostart);
         assert!(s.history.is_empty());
         assert_eq!(s.signin_state, SigninState::Unknown);
+        assert!(s.announce_enabled, "語音播報預設開啟");
+        assert_eq!(s.announce_voice, "", "語音預設留空(自動挑 zh-TW)");
     }
     #[test]
     fn load_missing_returns_defaults_silently() {
@@ -151,6 +159,7 @@ mod tests {
         assert_eq!(partial.hotkey, "Ctrl+Alt+Space");
         assert_eq!(partial.model, "minimax-m2.5:cloud");
         assert!(partial.known_subscription_models.is_empty(), "v1 settings without the field must default to empty");
+        assert!(partial.announce_enabled, "舊設定檔無此欄位時應預設開啟");
     }
     #[test]
     fn known_subscription_models_roundtrips() {

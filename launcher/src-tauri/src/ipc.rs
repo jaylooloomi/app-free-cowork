@@ -146,6 +146,8 @@ fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
         voice_hotkey: incoming.voice_hotkey.clone(),
         capture_hotkey: incoming.capture_hotkey.clone(),
         system_prompt: incoming.system_prompt.clone(),
+        announce_enabled: incoming.announce_enabled,
+        announce_voice: incoming.announce_voice.clone(),
         history: current.history.clone(),
         signin_state: current.signin_state.clone(),
         known_subscription_models: current.known_subscription_models.clone(),
@@ -773,6 +775,7 @@ fn handle_task_exit(
         }
         if is_background {
             crate::notify(app, &crate::i18n::task_done());
+            maybe_announce(app, log_path);
         }
         return;
     }
@@ -822,6 +825,23 @@ fn handle_task_exit(
             crate::notify(app, &msg);
         }
     }
+}
+
+/// 若啟用語音播報:在另一條執行緒讀取本次任務的 stream-json log、萃取一句摘要、
+/// 顯示播報 overlay。獨立執行緒避免讀檔/顯示拖慢 on_done 的佇列接續。
+/// 摘要萃取失敗(無 result/assistant、前景無 log)→ fallback 為「任務完成」。
+fn maybe_announce(app: &AppHandle, log_path: &std::path::Path) {
+    if !app.state::<AppState>().settings.lock_safe().announce_enabled {
+        return;
+    }
+    let app2 = app.clone();
+    let path = log_path.to_path_buf();
+    std::thread::spawn(move || {
+        let log = std::fs::read_to_string(&path).unwrap_or_default();
+        let summary =
+            crate::announce::extract_summary(&log).unwrap_or_else(crate::i18n::task_done);
+        crate::show_announcer(&app2, &summary);
+    });
 }
 
 /// Read last 4 KB of log for classification.
@@ -1722,6 +1742,8 @@ mod tests {
             voice_hotkey: "Ctrl+Shift+M".into(),
             capture_hotkey: "Ctrl+Shift+S".into(),
             system_prompt: "自訂個性".into(),
+            announce_enabled: false,
+            announce_voice: "Microsoft HsiaoChen".into(),
             // 前端的舊快照 — 必須被忽略
             history: vec!["stale".into()],
             signin_state: SigninState::No,
@@ -1740,6 +1762,8 @@ mod tests {
         assert_eq!(merged.voice_hotkey, "Ctrl+Shift+M", "voice_hotkey 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.capture_hotkey, "Ctrl+Shift+S", "capture_hotkey 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.system_prompt, "自訂個性", "system_prompt 屬 UI 欄位,以 incoming 為準");
+        assert!(!merged.announce_enabled, "announce_enabled 屬 UI 欄位,以 incoming 為準");
+        assert_eq!(merged.announce_voice, "Microsoft HsiaoChen", "announce_voice 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.history, vec!["真實歷史".to_string()], "history 以記憶體為準");
         assert_eq!(merged.signin_state, SigninState::Yes, "signin_state 以記憶體為準");
         assert_eq!(

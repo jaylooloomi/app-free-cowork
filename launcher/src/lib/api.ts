@@ -20,6 +20,10 @@ export interface Settings {
   capture_hotkey: string;
   /** 自訂助手個性系統提示;留空 = 內建預設 */
   system_prompt: string;
+  /** 任務完成時是否語音播報(玻璃 overlay + TTS) */
+  announce_enabled: boolean;
+  /** 播報使用的語音名稱(Web Speech voice.name);留空 = 自動挑 zh-TW */
+  announce_voice: string;
 }
 
 export interface StatusDto {
@@ -118,4 +122,6 @@ export const api = {
   openLogs: () => invoke<void>("open_logs"),
   hidePalette: () => invoke<void>("hide_palette"),
   openSettingsWindow: () => invoke<void>("open_settings_window"),
+  /** 播報唸完/淡出後請後端隱藏 announcer 視窗。 */
+  announcerDone: () => invoke<void>("announcer_done"),
 };
