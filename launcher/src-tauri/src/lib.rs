@@ -93,6 +93,61 @@ pub fn sync_autostart(app: &AppHandle, enabled: bool) {
     let _ = if enabled { am.enable() } else { am.disable() };
 }
 
+/// 回傳「目前焦點視窗」所在螢幕的實體座標原點與大小(虛擬桌面座標系)。
+/// 必須在 palette 的 show()/set_focus() 之前呼叫 — 此時前景視窗仍是使用者
+/// 剛才在操作的那個,於是面板會跟著出現在他正在用的螢幕上。
+/// 無前景視窗或 API 失敗回 None,呼叫端 fallback。
+#[cfg(windows)]
+fn focused_monitor_rect() -> Option<(tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>)> {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if hmon.0.is_null() {
+            return None;
+        }
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return None;
+        }
+        let r = mi.rcMonitor;
+        Some((
+            tauri::PhysicalPosition { x: r.left, y: r.top },
+            tauri::PhysicalSize {
+                width: (r.right - r.left).max(0) as u32,
+                height: (r.bottom - r.top).max(0) as u32,
+            },
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn focused_monitor_rect() -> Option<(tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>)> {
+    None
+}
+
+/// 純函式:給定目標螢幕的原點、大小與視窗大小,算出讓視窗在該螢幕水平置中、
+/// 垂直落在上方 1/4 處的左上角座標。抽出成純函式以便單元測試 — 多螢幕定位的
+/// 核心數學就在這裡(座標都相對於「所選螢幕」的原點)。
+fn centered_position(
+    monitor_pos: tauri::PhysicalPosition<i32>,
+    monitor_size: tauri::PhysicalSize<u32>,
+    window_size: tauri::PhysicalSize<u32>,
+) -> tauri::PhysicalPosition<i32> {
+    let x = monitor_pos.x + ((monitor_size.width.saturating_sub(window_size.width)) / 2) as i32;
+    let y = monitor_pos.y + (monitor_size.height / 4) as i32;
+    tauri::PhysicalPosition { x, y }
+}
+
 fn show_palette_centered(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("palette") {
         // 已顯示 → 再按一次快捷鍵 = 關閉面板(標準 toggle 行為)。
@@ -105,13 +160,18 @@ fn show_palette_centered(app: &AppHandle) {
         if app.state::<ipc::AppState>().catalog_cache.lock().unwrap().is_empty() {
             refresh_catalog(app.clone());
         }
-        if let Ok(Some(monitor)) = w.current_monitor() {
-            let ms = monitor.size();
-            let mp = monitor.position();
+        // 優先用「目前焦點視窗所在螢幕」,讓面板跨多螢幕跟隨使用者;
+        // 偵測失敗(非 Windows、無前景視窗、API 錯誤)時 fallback 回 palette
+        // 自己上次所在的螢幕(舊行為),確保絕不比現況更糟。
+        let rect = focused_monitor_rect().or_else(|| {
+            w.current_monitor()
+                .ok()
+                .flatten()
+                .map(|m| (*m.position(), *m.size()))
+        });
+        if let Some((mp, ms)) = rect {
             let ws = w.outer_size().unwrap_or(tauri::PhysicalSize { width: 640, height: 168 });
-            let x = mp.x + ((ms.width.saturating_sub(ws.width)) / 2) as i32;
-            let y = mp.y + (ms.height / 4) as i32;
-            let _ = w.set_position(tauri::PhysicalPosition { x, y });
+            let _ = w.set_position(centered_position(mp, ms, ws));
         }
         let _ = w.show();
         let _ = w.set_focus();
@@ -255,4 +315,58 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::centered_position;
+    use tauri::{PhysicalPosition, PhysicalSize};
+
+    #[test]
+    fn centers_horizontally_and_quarter_from_top_on_primary_monitor() {
+        // 主螢幕原點 (0,0)、1920x1080,palette 640x168
+        let pos = centered_position(
+            PhysicalPosition { x: 0, y: 0 },
+            PhysicalSize { width: 1920, height: 1080 },
+            PhysicalSize { width: 640, height: 168 },
+        );
+        assert_eq!(pos.x, (1920 - 640) / 2); // 640
+        assert_eq!(pos.y, 1080 / 4); // 270
+    }
+
+    #[test]
+    fn offsets_by_monitor_origin_for_secondary_monitor() {
+        // 右側第二螢幕,原點 x=1920(本功能的重點:座標相對所選螢幕原點)
+        let pos = centered_position(
+            PhysicalPosition { x: 1920, y: 0 },
+            PhysicalSize { width: 2560, height: 1440 },
+            PhysicalSize { width: 640, height: 168 },
+        );
+        assert_eq!(pos.x, 1920 + (2560 - 640) / 2); // 2880
+        assert_eq!(pos.y, 1440 / 4); // 360
+    }
+
+    #[test]
+    fn handles_monitor_with_negative_origin() {
+        // 左側螢幕原點為負(Windows 虛擬桌面常見)
+        let pos = centered_position(
+            PhysicalPosition { x: -1920, y: -120 },
+            PhysicalSize { width: 1920, height: 1080 },
+            PhysicalSize { width: 640, height: 168 },
+        );
+        assert_eq!(pos.x, -1920 + (1920 - 640) / 2); // -1280
+        assert_eq!(pos.y, -120 + 1080 / 4); // 150
+    }
+
+    #[test]
+    fn clamps_when_window_wider_than_monitor() {
+        // 視窗比螢幕寬 → saturating_sub 防 underflow,x 落在螢幕原點而非更左
+        let pos = centered_position(
+            PhysicalPosition { x: 100, y: 50 },
+            PhysicalSize { width: 320, height: 240 },
+            PhysicalSize { width: 640, height: 168 },
+        );
+        assert_eq!(pos.x, 100);
+        assert_eq!(pos.y, 50 + 240 / 4); // 110
+    }
 }
