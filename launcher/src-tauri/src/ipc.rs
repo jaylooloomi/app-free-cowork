@@ -80,6 +80,9 @@ pub struct AppState {
     pub next_task_id: AtomicU64,
     /// /api/me 回報的方案("free"/"pro"…);None = 尚未取得
     pub plan: Mutex<Option<String>>,
+    /// 週期排程清單(in-memory;持久化於 schedules.json)。排程器執行緒與 IPC 命令共用。
+    pub schedules: Mutex<Vec<crate::schedule::Schedule>>,
+    pub next_schedule_id: AtomicU64,
 }
 
 impl AppState {
@@ -91,6 +94,8 @@ impl AppState {
             queue: Mutex::new(QueueState::default()),
             next_task_id: AtomicU64::new(1),
             plan: Mutex::new(None),
+            schedules: Mutex::new(Vec::new()),
+            next_schedule_id: AtomicU64::new(1),
         }
     }
 }
@@ -576,6 +581,98 @@ fn emit_queue_changed(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("palette") {
         let _ = w.emit("queue-changed", ());
     }
+}
+
+// ───────────────────────── 週期排程 ─────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct ScheduleDto {
+    pub id: u64,
+    pub prompt: String,
+    pub recurrence: crate::schedule::Recurrence,
+    pub enabled: bool,
+    pub next_run: i64,
+}
+
+fn persist_schedules(list: &[crate::schedule::Schedule]) {
+    let _ = crate::schedule::save(&crate::schedules_path(), list);
+}
+
+/// 排程觸發 = 等同使用者送出一個提示詞:走現有提交/佇列路徑(背景、不阻塞呼叫端)。
+pub(crate) fn trigger_prompt(app: &AppHandle, prompt: String, workdir: Option<String>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if let Err(e) = submit_prompt(app.clone(), state, prompt, workdir).await {
+            crate::notify(&app, &e);
+        }
+    });
+}
+
+#[tauri::command]
+pub fn create_schedule(
+    app: AppHandle,
+    state: State<AppState>,
+    prompt: String,
+    workdir: Option<String>,
+    recurrence: crate::schedule::Recurrence,
+    run_immediately: bool,
+) -> u64 {
+    let id = state
+        .next_schedule_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let now = chrono::Local::now();
+    let s = crate::schedule::Schedule {
+        id,
+        prompt: prompt.clone(),
+        workdir: workdir.clone(),
+        recurrence: recurrence.clone(),
+        run_immediately,
+        enabled: true,
+        next_run: crate::schedule::next_run(&recurrence, now).timestamp(),
+        last_run: None,
+    };
+    {
+        let mut g = state.schedules.lock_safe();
+        g.push(s);
+        persist_schedules(&g);
+    }
+    if run_immediately {
+        trigger_prompt(&app, prompt, workdir);
+    }
+    id
+}
+
+#[tauri::command]
+pub fn list_schedules(state: State<AppState>) -> Vec<ScheduleDto> {
+    state
+        .schedules
+        .lock_safe()
+        .iter()
+        .map(|s| ScheduleDto {
+            id: s.id,
+            prompt: s.prompt.clone(),
+            recurrence: s.recurrence.clone(),
+            enabled: s.enabled,
+            next_run: s.next_run,
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn delete_schedule(state: State<AppState>, id: u64) {
+    let mut g = state.schedules.lock_safe();
+    g.retain(|s| s.id != id);
+    persist_schedules(&g);
+}
+
+#[tauri::command]
+pub fn set_schedule_enabled(state: State<AppState>, id: u64, enabled: bool) {
+    let mut g = state.schedules.lock_safe();
+    if let Some(s) = g.iter_mut().find(|s| s.id == id) {
+        s.enabled = enabled;
+    }
+    persist_schedules(&g);
 }
 
 /// 串流任務啟動:通知面板重置輸出區並進入「執行中」狀態。`gen` 是本次任務的

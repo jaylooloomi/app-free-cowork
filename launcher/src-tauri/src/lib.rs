@@ -327,6 +327,57 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// schedules.json 路徑(與 settings 同處:config_dir/free-claude-code/)。
+pub fn schedules_path() -> std::path::PathBuf {
+    logging::logs_dir()
+        .parent()
+        .map(|d| d.join("schedules.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from("schedules.json"))
+}
+
+/// 載入排程、重算 next_run、設定 id 計數器,並起一條每 30 秒檢查到期排程的背景執行緒。
+/// 到期排程走現有 `ipc::trigger_prompt`(= 使用者送出提示詞)執行,自動沿用佇列與 on_done。
+fn init_schedules_and_scheduler(handle: &AppHandle) {
+    use std::sync::atomic::Ordering;
+    let mut list = schedule::load(&schedules_path());
+    let now = chrono::Local::now();
+    for s in list.iter_mut() {
+        s.next_run = schedule::next_run(&s.recurrence, now).timestamp();
+    }
+    let max_id = list.iter().map(|s| s.id).max().unwrap_or(0);
+    {
+        let st = handle.state::<AppState>();
+        st.next_schedule_id.store(max_id + 1, Ordering::Relaxed);
+        *st.schedules.lock().unwrap_or_else(|e| e.into_inner()) = list;
+    }
+    let handle = handle.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let now = chrono::Local::now();
+        let now_ts = now.timestamp();
+        // 收集到期者(複製出最小資訊後立即放鎖,避免持鎖期間執行任務)
+        let due: Vec<(String, Option<String>)> = {
+            let st = handle.state::<AppState>();
+            let mut g = st.schedules.lock().unwrap_or_else(|e| e.into_inner());
+            let mut due = Vec::new();
+            for s in g.iter_mut() {
+                if s.enabled && now_ts >= s.next_run {
+                    due.push((s.prompt.clone(), s.workdir.clone()));
+                    s.last_run = Some(now_ts);
+                    s.next_run = schedule::next_run(&s.recurrence, now).timestamp();
+                }
+            }
+            if !due.is_empty() {
+                let _ = schedule::save(&schedules_path(), &g);
+            }
+            due
+        };
+        for (prompt, workdir) in due {
+            ipc::trigger_prompt(&handle, prompt, workdir);
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // toast 左上角 icon 靠 AUMID 解析 → 行程一啟動就採用固定 AUMID(早於任何通知)。
@@ -378,7 +429,11 @@ pub fn run() {
             ipc::capture_screenshot,
             ipc::pick_folder,
             announcer_done,
-            take_announce
+            take_announce,
+            ipc::create_schedule,
+            ipc::list_schedules,
+            ipc::delete_schedule,
+            ipc::set_schedule_enabled
         ])
         .on_window_event(|window, event| {
             // 三個視窗都只隱藏、永不關閉 — 否則 X 會銷毀視窗導致 app 結束
@@ -409,6 +464,8 @@ pub fn run() {
             refresh_catalog(handle.clone());
             ipc::refresh_plan(handle.clone());
             build_tray(&handle)?;
+            // 載入週期排程、重算 next_run、起背景排程器執行緒(每 30 秒檢查到期)。
+            init_schedules_and_scheduler(&handle);
             let argv: Vec<String> = std::env::args().collect();
             handle_argv(&handle, &argv);
             Ok(())
