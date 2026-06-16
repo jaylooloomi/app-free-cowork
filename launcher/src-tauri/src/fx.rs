@@ -33,3 +33,13 @@ pub fn apply_palette_effects(window: &tauri::WebviewWindow) {
     };
     EFFECTS_APPLIED.store(result.is_ok(), Ordering::Relaxed);
 }
+
+/// Announcer overlay 的「深色真毛玻璃」。走與 palette 相同的 apply_blur(SWCA)路徑
+/// —— 這是 Win11 透明視窗背後唯一能做出「真的模糊桌面」的方式(acrylic 不渲染、
+/// 淺色 tint 只會變濁灰)。深色 tint 讓淺色字清楚。不動 EFFECTS_APPLIED(palette 專用)。
+pub fn apply_announcer_effects(window: &tauri::WebviewWindow) {
+    let build = windows_version::OsVersion::current().build;
+    if build >= 17763 {
+        let _ = window_vibrancy::apply_blur(window, Some((20, 20, 28, 150)));
+    }
+}

@@ -39,11 +39,17 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
 # 通知 icon:把 AUMID 綁定到 icon(寫 HKCU AppUserModelId 機碼)
 winreg = "0.52"
-windows = { version = "0.62.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+windows = { version = "0.62.2", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
 
 [dev-dependencies]
 # Serializes the two signin tests that contend on the process-global SIGNIN_GUARD
 # mutex; default features (async/logging) are unused, so disable them.
 serial_test = { version = "3.5.0", default-features = false }
 tempfile = "3.27.0"
+
+# launcher 是大型 crate;在記憶體吃緊的機器上用預設 opt-level 3 編譯,rustc/LLVM 會 OOM。
+# 對一個閒置等待熱鍵的桌面程式,opt-level 1 對執行效能無感,卻大幅降低編譯期記憶體,
+# 讓建置在低記憶體環境也穩定。相依套件仍維持預設 opt-level 3(本節只覆寫 launcher 套件)。
+[profile.release.package.launcher]
+opt-level = 1
 

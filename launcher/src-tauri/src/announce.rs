@@ -4,7 +4,9 @@
 /// 把一段文字截成最多 `max` 句的口語短句:折疊空白/換行,遇到句末標點計數,
 /// 達到 `max` 句或超過硬上限即停。避免把整段(含程式碼)都唸出來。
 fn first_sentences(text: &str, max: usize) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // 去掉 markdown 記號(粗體 ** 、行內碼 ` 、標題 #),唸/顯示才乾淨。
+    let cleaned: String = text.chars().filter(|c| !matches!(c, '*' | '`' | '#')).collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out = String::new();
     let mut sentences = 0;
     for ch in collapsed.chars() {
@@ -125,6 +127,12 @@ mod tests {
     fn truncates_to_two_sentences() {
         let log = r#"{"type":"result","result":"第一句。第二句。第三句不該出現。"}"#;
         assert_eq!(extract_summary(log).unwrap(), "第一句。第二句。");
+    }
+
+    #[test]
+    fn strips_markdown_marks() {
+        let log = r#"{"type":"result","result":"我是 **Claude**,模型 `opus`。"}"#;
+        assert_eq!(extract_summary(log).unwrap(), "我是 Claude,模型 opus。");
     }
 
     #[test]

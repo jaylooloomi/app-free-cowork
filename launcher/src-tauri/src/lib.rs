@@ -180,13 +180,21 @@ fn show_palette_centered(app: &AppHandle) {
     }
 }
 
+/// 待播報的摘要文字。Rust 在 show 前存入,前端掛載/收到通知時用 take_announce
+/// 主動拉取 —— 避免「emit 早於 webview 監聽就緒」的 race(首次顯示尤其會漏接)。
+static PENDING_ANNOUNCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// 顯示任務完成播報 overlay:定位到焦點螢幕下方中央,套上 WS_EX_NOACTIVATE
 /// (Tauri 的 focus flag 在 Windows 不可靠,用這個才能保證 show 不搶使用者焦點、
-/// 不打斷打字),點擊穿透,顯示但不 set_focus,並把摘要文字 emit 給前端朗讀。
+/// 不打斷打字),點擊穿透,顯示但不 set_focus,並通知前端去拉取待播文字。
 pub fn show_announcer(app: &AppHandle, text: &str) {
     let Some(w) = app.get_webview_window("announcer") else {
         return;
     };
+    // 先存待播文字,再顯示;前端就緒後會 take_announce 拉取(可靠,不怕事件 race)。
+    if let Ok(mut g) = PENDING_ANNOUNCE.lock() {
+        *g = Some(text.to_string());
+    }
     let rect = focused_monitor_rect().or_else(|| {
         w.current_monitor()
             .ok()
@@ -197,7 +205,8 @@ pub fn show_announcer(app: &AppHandle, text: &str) {
         let ws = w
             .outer_size()
             .unwrap_or(tauri::PhysicalSize { width: 600, height: 220 });
-        let _ = w.set_position(announce::bottom_centered_position(mp, ms, ws, 48));
+        // margin 160:離工作列遠一點、往上(使用者要求位置上移)。
+        let _ = w.set_position(announce::bottom_centered_position(mp, ms, ws, 160));
     }
     #[cfg(windows)]
     if let Ok(hwnd) = w.hwnd() {
@@ -212,10 +221,18 @@ pub fn show_announcer(app: &AppHandle, text: &str) {
             SetWindowLongPtrW(h, GWL_EXSTYLE, ex | (WS_EX_NOACTIVATE.0 as isize));
         }
     }
-    let _ = w.set_ignore_cursor_events(true);
+    // 關閉點擊穿透:讓停止鈕/點面板可被點到。WS_EX_NOACTIVATE 已套,點擊不會搶焦點。
+    let _ = w.set_ignore_cursor_events(false);
     let _ = w.show();
     // 故意不呼叫 set_focus():保持使用者原本的前景視窗持有鍵盤焦點。
-    let _ = w.emit("announce", serde_json::json!({ "text": text }));
+    // 通知前端「有新播報可拉」;即使此事件因 race 漏接,前端 onMount 的拉取也會補上。
+    let _ = w.emit("announce", ());
+}
+
+/// 前端拉取待播文字(並清空)。回 None = 沒有待播。
+#[tauri::command]
+fn take_announce() -> Option<String> {
+    PENDING_ANNOUNCE.lock().ok().and_then(|mut g| g.take())
 }
 
 /// 播報唸完/淡出後,前端呼叫此命令把 overlay 藏起來(下次播報再 show)。
@@ -223,6 +240,32 @@ pub fn show_announcer(app: &AppHandle, text: &str) {
 fn announcer_done(app: AppHandle) {
     if let Some(w) = app.get_webview_window("announcer") {
         let _ = w.hide();
+    }
+}
+
+/// 用 DWM 把視窗(含 OS 模糊底)裁成圓角。沒這個的話,apply_blur 的模糊底會填滿
+/// 整個方形視窗,在內容外緣露出方塊("黑方塊")。DWMWCP_ROUND 在 DWM 合成層裁切,
+/// 連模糊底一起裁圓。半徑是 Win11 系統固定值(約 8px)。
+#[cfg(windows)]
+fn round_window_corners(window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DWM_WINDOW_CORNER_PREFERENCE,
+    };
+    let Ok(raw) = window.hwnd() else {
+        return;
+    };
+    // 跨 windows-crate 版本安全地重建 HWND。
+    let hwnd = HWND(raw.0 as _);
+    let pref: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
     }
 }
 
@@ -333,7 +376,8 @@ pub fn run() {
             ipc::save_pasted_image,
             ipc::capture_screenshot,
             ipc::pick_folder,
-            announcer_done
+            announcer_done,
+            take_announce
         ])
         .on_window_event(|window, event| {
             // 三個視窗都只隱藏、永不關閉 — 否則 X 會銷毀視窗導致 app 結束
@@ -346,9 +390,12 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("palette") {
                 fx::apply_palette_effects(&w);
             }
-            // 播報 overlay 也套上 OS acrylic,讓玻璃面板後面的桌面模糊透出。
+            // 播報 overlay:深色真毛玻璃(apply_blur 真模糊桌面)+ DWM 圓角
+            // (把整個方形模糊底裁成圓角,消除露在內容外的「黑方塊」)。
             if let Some(w) = app.get_webview_window("announcer") {
-                fx::apply_palette_effects(&w);
+                fx::apply_announcer_effects(&w);
+                #[cfg(windows)]
+                round_window_corners(&w);
             }
             let handle = app.handle().clone();
             if let Err(e) = register_hotkey(&handle, &loaded.hotkey) {

@@ -124,4 +124,6 @@ export const api = {
   openSettingsWindow: () => invoke<void>("open_settings_window"),
   /** 播報唸完/淡出後請後端隱藏 announcer 視窗。 */
   announcerDone: () => invoke<void>("announcer_done"),
+  /** 拉取待播報文字(並清空);null = 無。避免事件 race 漏接。 */
+  takeAnnounce: () => invoke<string | null>("take_announce"),
 };

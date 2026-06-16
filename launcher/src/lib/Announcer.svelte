@@ -71,6 +71,14 @@
     }, 1400);
   }
 
+  // 使用者按停止鈕:立刻停語音、淡出、隱藏視窗。
+  function stop() {
+    speechSynthesis.cancel();
+    speaking = false;
+    fading = true;
+    setTimeout(() => api.announcerDone().catch(() => {}), 260);
+  }
+
   function announce(text: string) {
     speechSynthesis.cancel();
     fading = false;
@@ -81,6 +89,13 @@
       return;
     }
     speakFrom(0);
+  }
+
+  async function pull() {
+    try {
+      const t = await api.takeAnnounce();
+      if (t) announce(t);
+    } catch {}
   }
 
   onMount(() => {
@@ -95,9 +110,14 @@
     void speechSynthesis.getVoices();
     animateWave();
 
-    const un = listen<{ text: string }>("announce", (e) => announce(e.payload.text));
+    // 不靠事件時機(emit 可能早於 webview 監聽就緒而漏接):每 350ms 主動拉一次。
+    // take_announce 會清空待播,所以最多只播一次,不會重複。事件當快速路徑(可有可無)。
+    pull();
+    const iv = setInterval(pull, 350);
+    const un = listen("announce", () => pull());
     return () => {
       cancelAnimationFrame(raf);
+      clearInterval(iv);
       un.then((f) => f());
     };
   });
@@ -108,6 +128,7 @@
     <div class="head">
       <div class="orb" class:on={speaking}><i></i><span class="ring"></span></div>
       <div class="title">FreeCowork<b>任務完成</b></div>
+      <button class="stop" onclick={stop} aria-label="停止播報">✕</button>
     </div>
     <div class="subs">
       {#each sentences as s, i}
@@ -121,17 +142,24 @@
 </div>
 
 <style>
-  :global(html),
+  /* 只限定 announcer 視窗 — 用 :has() 避免 :global(html) 洩漏到設定/面板視窗
+     而把它們的捲軸關掉。 */
+  :global(html:has(body.announcer-body)) {
+    background: transparent !important;
+  }
   :global(body.announcer-body) {
     background: transparent !important;
     overflow: hidden;
   }
+  /* OS apply_blur 把整個視窗變成深色真毛玻璃,DWM 把視窗裁圓角 —— 所以這裡不畫
+     任何面板底/邊框/圓角,內容直接鋪在模糊玻璃上(同 palette 的做法)。 */
   .wrap {
     height: 100vh;
+    box-sizing: border-box;
     display: flex;
-    align-items: center;
+    flex-direction: column;
     justify-content: center;
-    padding: 14px;
+    padding: 14px 22px;
     transition: opacity 0.5s, transform 0.5s;
   }
   .wrap.fading {
@@ -140,11 +168,6 @@
   }
   .panel {
     width: 100%;
-    background: rgba(26, 28, 38, 0.55);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 18px;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    padding: 16px 20px 18px;
     color: #eef1f8;
     font-family: "Segoe UI", "Microsoft JhengHei", sans-serif;
   }
@@ -153,6 +176,26 @@
     align-items: center;
     gap: 12px;
     margin-bottom: 10px;
+  }
+  .stop {
+    margin-left: auto;
+    width: 26px;
+    height: 26px;
+    flex: none;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12);
+    color: #d3d7e3;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+  }
+  .stop:hover {
+    background: rgba(255, 255, 255, 0.22);
   }
   .orb {
     position: relative;
