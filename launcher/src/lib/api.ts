@@ -82,6 +82,22 @@ export interface WizardPlan {
   steps: string[];
 }
 
+/** 週期模型(對應 Rust serde tag 格式)。weekday:Mon=1 .. Sun=7。 */
+export type Recurrence =
+  | { kind: "every_minutes"; minutes: number }
+  | { kind: "every_hours"; hours: number }
+  | { kind: "daily_at"; hour: number; minute: number }
+  | { kind: "weekly_at"; weekday: number; hour: number; minute: number };
+
+export interface ScheduleDto {
+  id: number;
+  prompt: string;
+  recurrence: Recurrence;
+  enabled: boolean;
+  /** 下次執行 unix 秒 */
+  next_run: number;
+}
+
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (newSettings: Settings) => invoke<void>("save_settings", { newSettings }),
@@ -126,4 +142,10 @@ export const api = {
   announcerDone: () => invoke<void>("announcer_done"),
   /** 拉取待播報文字(並清空);null = 無。避免事件 race 漏接。 */
   takeAnnounce: () => invoke<string | null>("take_announce"),
+  /** 建立週期排程,回傳 id。run_immediately = 是否同時立刻跑一次。 */
+  createSchedule: (prompt: string, workdir: string | null, recurrence: Recurrence, runImmediately: boolean) =>
+    invoke<number>("create_schedule", { prompt, workdir, recurrence, runImmediately }),
+  listSchedules: () => invoke<ScheduleDto[]>("list_schedules"),
+  deleteSchedule: (id: number) => invoke<void>("delete_schedule", { id }),
+  setScheduleEnabled: (id: number, enabled: boolean) => invoke<void>("set_schedule_enabled", { id, enabled }),
 };

@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-  import { api, type StatusDto, type QueueDto, type ModelEntry, type Settings } from "./api";
+  import { api, type StatusDto, type QueueDto, type ModelEntry, type Settings, type Recurrence, type ScheduleDto } from "./api";
   import { strings } from "./strings";
 
   let input = $state("");
@@ -40,6 +40,38 @@
   // 黏著式:設定後持續沿用到多個任務,直到清除。
   let workdir = $state<string | null>(null);
   let picking = $state(false); // 資料夾選擇對話框進行中(暫停自動隱藏面板)
+
+  // 排程模式:🕐 切換;送出時建立週期排程而非立即跑一次。
+  let scheduleMode = $state(false);
+  let recKind = $state<"every_minutes" | "every_hours" | "daily_at" | "weekly_at">("daily_at");
+  let recEvery = $state(30); // every_minutes / every_hours 的數值
+  let recHour = $state(9);
+  let recMinute = $state(0);
+  let recWeekday = $state(1); // Mon=1 .. Sun=7
+  let runImmediately = $state(true);
+  let schedules = $state<ScheduleDto[]>([]);
+  const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
+
+  function buildRecurrence(): Recurrence {
+    if (recKind === "every_minutes") return { kind: "every_minutes", minutes: recEvery };
+    if (recKind === "every_hours") return { kind: "every_hours", hours: recEvery };
+    if (recKind === "daily_at") return { kind: "daily_at", hour: recHour, minute: recMinute };
+    return { kind: "weekly_at", weekday: recWeekday, hour: recHour, minute: recMinute };
+  }
+  function recurrenceLabel(r: Recurrence): string {
+    if (r.kind === "every_minutes") return `每 ${r.minutes} 分鐘`;
+    if (r.kind === "every_hours") return `每 ${r.hours} 小時`;
+    const hm = `${String(r.hour).padStart(2, "0")}:${String(r.minute).padStart(2, "0")}`;
+    if (r.kind === "daily_at") return `每天 ${hm}`;
+    return `每週${WEEKDAYS[(r.weekday - 1) % 7]} ${hm}`;
+  }
+  async function loadSchedules() {
+    try {
+      schedules = await api.listSchedules();
+    } catch {
+      schedules = [];
+    }
+  }
 
   // 串流結果回顯(背景模式):後端把 claude 的 stream-json 逐行轉送過來,
   // 前端解析後即時顯示助手文字、工具呼叫與最終結果。
@@ -111,6 +143,7 @@
   onMount(() => {
     refresh();
     refreshQueue();
+    loadSchedules();
     el?.focus();
     // OS acrylic 真的套上才用玻璃樣式;查詢失敗一律退回純色
     api
@@ -131,6 +164,7 @@
       stopListening();
       refresh();
       refreshQueue();
+      loadSchedules();
       el?.focus();
     });
     const unlistenQueue = listen("queue-changed", () => {
@@ -237,6 +271,17 @@
       const fullPrompt = attachments.length
         ? `${attachments.map((p) => `請看這張圖片:${p}`).join("\n")}\n${input}`.trim()
         : input;
+      // 排程模式:建立週期排程(非立即送出),清空輸入並重整排程清單後返回。
+      if (scheduleMode) {
+        await api.createSchedule(fullPrompt, workdir, buildRecurrence(), runImmediately);
+        scheduleMode = false;
+        input = "";
+        attachments = [];
+        hIndex = -1;
+        showTransient(settings?.locale === "en" ? "Scheduled ✓" : "已排程 ✓");
+        await loadSchedules();
+        return; // finally 仍會跑(busy=false、focus)
+      }
       // "launched"/"wizard" 時後端已隱藏面板;"queued" 保持開啟並提示已入列
       const outcome = await api.submitPrompt(fullPrompt, workdir);
       // 背景(串流)模式啟動後面板保留顯示輸出 → 清空輸入,等下一個指令;
@@ -634,6 +679,30 @@
       <span class="attach-hint">{S.attachHint}</span>
     </div>
   {/if}
+  {#if scheduleMode}
+    <div class="sched-picker">
+      <select bind:value={recKind}>
+        <option value="every_minutes">每 N 分鐘</option>
+        <option value="every_hours">每 N 小時</option>
+        <option value="daily_at">每天</option>
+        <option value="weekly_at">每週</option>
+      </select>
+      {#if recKind === "every_minutes" || recKind === "every_hours"}
+        <input type="number" min="1" bind:value={recEvery} class="sp-num" />
+        <span>{recKind === "every_minutes" ? "分鐘" : "小時"}</span>
+      {:else}
+        {#if recKind === "weekly_at"}
+          <select bind:value={recWeekday}>
+            {#each WEEKDAYS as w, i (i)}<option value={i + 1}>週{w}</option>{/each}
+          </select>
+        {/if}
+        <input type="number" min="0" max="23" bind:value={recHour} class="sp-num" />
+        <span>:</span>
+        <input type="number" min="0" max="59" bind:value={recMinute} class="sp-num" />
+      {/if}
+      <label class="sp-now"><input type="checkbox" bind:checked={runImmediately} /> 立即跑一次</label>
+    </div>
+  {/if}
   <div class="input-row">
     <input
       bind:this={el}
@@ -692,8 +761,10 @@
     </button>
     <button
       class="sched"
+      class:active={scheduleMode}
+      onclick={() => (scheduleMode = !scheduleMode)}
       onmousedown={(e) => e.preventDefault()}
-      title="排程"
+      title="排程(週期性執行)"
       aria-label="排程"
     >
       <svg
@@ -738,6 +809,21 @@
       </svg>
     </button>
   </div>
+
+  {#if schedules.length > 0 && !dropdownOpen}
+    <div class="queue sched-list">
+      <div class="qsection">排程中</div>
+      {#each schedules as s (s.id)}
+        <div class="qrow" class:sched-off={!s.enabled}>
+          <span class="qtext">{recurrenceLabel(s.recurrence)} · {truncate(s.prompt)}</span>
+          <button class="link" onclick={() => api.setScheduleEnabled(s.id, !s.enabled).then(loadSchedules)}>
+            {s.enabled ? "暫停" : "啟用"}
+          </button>
+          <button class="x" onclick={() => api.deleteSchedule(s.id).then(loadSchedules)} title="刪除排程" aria-label="刪除排程">✕</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
 
   <!-- 選單開啟時暫時隱藏佇列,避免合計高度頂到上限被裁切 -->
   <!-- 「排隊/執行中」與「已完成」拆成兩個獨立區域:已完成區不自己捲動(隨內容長高),
@@ -1049,6 +1135,39 @@
   /* 已選工作資料夾時,資料夾鈕高亮提示 */
   .cap.active {
     color: #7aa2f7;
+  }
+  .sched.active {
+    color: #7aa2f7;
+  }
+  .sched-picker {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 4px 2px;
+    font-size: 13px;
+    color: #bbb;
+  }
+  .sched-picker select,
+  .sched-picker input {
+    background: #2a2a2a;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 4px 6px;
+    font: inherit;
+  }
+  .sched-picker .sp-num {
+    width: 52px;
+  }
+  .sched-picker .sp-now {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #999;
+  }
+  .qrow.sched-off {
+    opacity: 0.45;
   }
   .mic.listening {
     color: #7aa2f7;
