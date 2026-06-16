@@ -362,14 +362,15 @@ fn clipboard_image_fingerprint() -> Option<(usize, usize, u64)> {
     Some((img.width, img.height, fnv1a(&img.bytes)))
 }
 
-/// 輪詢剪貼簿等待框選完成(新影像)。同時偵測框選遮罩行程:遮罩開過又關閉、且 1.5 秒
-/// 寬限內仍無新圖 → 視為使用者取消,立即回 None(不必傻等整個 timeout)。timeout 為安全網。
+/// 輪詢剪貼簿等待框選完成(新影像)。同時偵測框選遮罩是否「在前景」:遮罩曾出現於前景、
+/// 之後離開前景(使用者按 Esc 取消或框選完成)、且寬限期內仍無新圖 → 視為取消,立即回
+/// None(不必傻等整個 timeout)。timeout 為安全網。
 fn poll_new_clipboard_png(baseline: Option<(usize, usize, u64)>, timeout: std::time::Duration) -> Option<Vec<u8>> {
+    let tick = std::time::Duration::from_millis(400);
+    let mut watch = CancelWatch::new(std::time::Duration::from_millis(1500));
     let start = std::time::Instant::now();
-    let mut overlay_seen = false; // 是否曾偵測到遮罩行程(確認遮罩確實開過)
-    let mut closed_at: Option<std::time::Instant> = None; // 遮罩消失的時間點
     while start.elapsed() < timeout {
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        std::thread::sleep(tick);
         // 1) 剪貼簿出現新圖 = 框選完成
         if let Ok(mut cb) = arboard::Clipboard::new() {
             if let Ok(img) = cb.get_image() {
@@ -379,50 +380,91 @@ fn poll_new_clipboard_png(baseline: Option<(usize, usize, u64)>, timeout: std::t
                 }
             }
         }
-        // 2) 快速取消:遮罩開過、現在已關閉,寬限 1.5s 仍無新圖 → 取消
-        if snip_overlay_running() {
-            overlay_seen = true;
-            closed_at = None;
-        } else if overlay_seen {
-            match closed_at {
-                None => closed_at = Some(std::time::Instant::now()),
-                Some(t) if t.elapsed() >= std::time::Duration::from_millis(1500) => return None,
-                _ => {}
-            }
+        // 2) 快速取消:遮罩曾在前景、現在已離開前景,寬限期仍無新圖 → 取消
+        if watch.observe(snip_overlay_visible(), tick) {
+            return None;
         }
     }
     None
 }
 
-/// 是否有 Windows 框選遮罩行程在執行。ms-screenclip 的遮罩在不同 Windows 版本由不同行程
-/// 承載,故比對一組候選名稱(小寫包含比對)。用來偵測遮罩關閉(取消或完成)。
+/// 純狀態機:依每次輪詢「框選遮罩是否在前景」判斷是否該視為取消。遮罩出現過(seen)後,
+/// 連續不在前景累計達 grace → 取消;期間若又回到前景則歸零(避免框選過程中的短暫抖動
+/// 誤判)。不依賴真實時鐘,可單元測試。
+struct CancelWatch {
+    grace: std::time::Duration,
+    seen: bool,
+    hidden_for: std::time::Duration,
+}
+
+impl CancelWatch {
+    fn new(grace: std::time::Duration) -> Self {
+        Self { grace, seen: false, hidden_for: std::time::Duration::ZERO }
+    }
+
+    /// 回傳 true = 應視為取消。`tick` 為距上次觀察的間隔。
+    fn observe(&mut self, overlay_visible: bool, tick: std::time::Duration) -> bool {
+        if overlay_visible {
+            self.seen = true;
+            self.hidden_for = std::time::Duration::ZERO;
+            false
+        } else if self.seen {
+            self.hidden_for += tick;
+            self.hidden_for >= self.grace
+        } else {
+            // 遮罩還沒出現過就不在前景 → 尚未開始,不算取消
+            false
+        }
+    }
+}
+
+/// 框選遮罩此刻是否「在前景」。ms-screenclip 的遮罩(SnippingTool 等)被叫出時會搶到前景
+/// 視窗;使用者按 Esc 取消或框選完成後,前景便離開該行程。用「前景視窗的行程名」判斷,
+/// 遠比「行程是否存在」可靠 —— Win11 的 SnippingTool.exe 會常駐背景,行程存在與否無法
+/// 表示遮罩是否顯示(實測:閒置時仍有一支 SnippingTool.exe 常駐)。
 #[cfg(windows)]
-fn snip_overlay_running() -> bool {
+fn snip_overlay_visible() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    const CANDIDATES: [&str; 3] = ["screenclippinghost", "snippingtool", "screensketch"];
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return false;
+        }
+        match process_name_for_pid(pid) {
+            Some(name) => CANDIDATES.iter().any(|c| name.contains(c)),
+            None => false,
+        }
+    }
+}
+
+/// 由 pid 取得行程執行檔名(小寫);找不到 → None。
+#[cfg(windows)]
+fn process_name_for_pid(pid: u32) -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    const CANDIDATES: [&str; 3] = ["screenclippinghost", "snippingtool", "screensketch"];
     unsafe {
-        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
-            return false;
-        };
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
-        let mut found = false;
+        let mut result = None;
         if Process32FirstW(snap, &mut entry).is_ok() {
             loop {
-                let end = entry
-                    .szExeFile
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(entry.szExeFile.len());
-                let name = String::from_utf16_lossy(&entry.szExeFile[..end]).to_lowercase();
-                if CANDIDATES.iter().any(|c| name.contains(c)) {
-                    found = true;
+                if entry.th32ProcessID == pid {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    result =
+                        Some(String::from_utf16_lossy(&entry.szExeFile[..end]).to_lowercase());
                     break;
                 }
                 if Process32NextW(snap, &mut entry).is_err() {
@@ -431,12 +473,12 @@ fn snip_overlay_running() -> bool {
             }
         }
         let _ = CloseHandle(snap);
-        found
+        result
     }
 }
 
 #[cfg(not(windows))]
-fn snip_overlay_running() -> bool {
+fn snip_overlay_visible() -> bool {
     false
 }
 
@@ -1668,6 +1710,43 @@ mod tests {
             panic!("deliberately poison the mutex for this test");
         }));
         assert!(m.is_poisoned(), "helper 必須使 mutex 中毒");
+    }
+
+    #[test]
+    fn cancel_watch_never_cancels_before_overlay_seen() {
+        // 遮罩還沒出現於前景(seen=false),即使連續不在前景,也不該判定取消
+        // ——對應「行程常駐但遮罩沒顯示」時 snip_overlay_visible() 應回 false 的情境
+        let mut w = CancelWatch::new(std::time::Duration::from_millis(1500));
+        for _ in 0..10 {
+            assert!(!w.observe(false, std::time::Duration::from_millis(400)));
+        }
+    }
+
+    #[test]
+    fn cancel_watch_cancels_after_overlay_hidden_past_grace() {
+        let mut w = CancelWatch::new(std::time::Duration::from_millis(1500));
+        // 遮罩出現於前景(框選遮罩彈出)
+        assert!(!w.observe(true, std::time::Duration::from_millis(400)));
+        // 離開前景(按 Esc):寬限期內(<1500ms)先不取消
+        assert!(!w.observe(false, std::time::Duration::from_millis(400))); // 累計 400
+        assert!(!w.observe(false, std::time::Duration::from_millis(400))); // 累計 800
+        assert!(!w.observe(false, std::time::Duration::from_millis(400))); // 累計 1200
+        // 跨過 1500ms 寬限且仍無新圖 → 取消
+        assert!(w.observe(false, std::time::Duration::from_millis(400))); // 累計 1600
+    }
+
+    #[test]
+    fn cancel_watch_resets_when_overlay_returns_to_foreground() {
+        // 框選過程中前景短暫抖動(遮罩仍在),不該誤判取消
+        let mut w = CancelWatch::new(std::time::Duration::from_millis(1500));
+        assert!(!w.observe(true, std::time::Duration::from_millis(400)));
+        assert!(!w.observe(false, std::time::Duration::from_millis(400))); // 累計 400
+        assert!(!w.observe(true, std::time::Duration::from_millis(400))); // 回到前景 → 歸零
+        // 再次離開必須重新累計,不會因先前的 400 提早取消
+        assert!(!w.observe(false, std::time::Duration::from_millis(400))); // 累計 400
+        assert!(!w.observe(false, std::time::Duration::from_millis(400))); // 累計 800
+        assert!(!w.observe(false, std::time::Duration::from_millis(400))); // 累計 1200
+        assert!(w.observe(false, std::time::Duration::from_millis(400))); // 累計 1600 → 取消
     }
 
     #[test]

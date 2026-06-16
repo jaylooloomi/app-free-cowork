@@ -461,6 +461,8 @@
   // 截圖鈕:後端先隱藏面板 → 觸發 Windows 框選 → 取回剪貼簿影像 → 回傳暫存路徑;
   // 取回後面板已被後端重新顯示,這裡把圖片加進附件(同貼上圖片的流程)。
   async function onCapture() {
+    // 截圖鈕刻意不因 capturing 而 disable(避免取消後若狀態未即時清除,按鈕看起來卡住)。
+    // 這個防重入 guard 確保即使按鈕可點,截圖進行中重複點擊也不會疊觸發。
     if (capturing) return;
     error = "";
     capturing = true;
@@ -744,7 +746,7 @@
       class="cap"
       onclick={onCapture}
       onmousedown={(e) => e.preventDefault()}
-      disabled={busy || offline || capturing}
+      disabled={busy || offline}
       title={capTip}
       aria-label={capTip}
     >
