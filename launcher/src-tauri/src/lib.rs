@@ -1,5 +1,6 @@
 pub mod announce;
 pub mod bootstrap;
+pub mod schedule;
 pub mod catalog;
 pub mod command;
 pub mod doctor;
