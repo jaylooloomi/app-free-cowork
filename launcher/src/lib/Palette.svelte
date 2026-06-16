@@ -691,6 +691,27 @@
       </svg>
     </button>
     <button
+      class="sched"
+      onmousedown={(e) => e.preventDefault()}
+      title="排程"
+      aria-label="排程"
+    >
+      <svg
+        viewBox="0 0 24 24"
+        width="18"
+        height="18"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <polyline points="12 7 12 12 15 14" />
+      </svg>
+    </button>
+    <button
       class="mic"
       class:listening
       onclick={onMic}
@@ -998,7 +1019,8 @@
     outline: none;
   }
   .mic,
-  .cap {
+  .cap,
+  .sched {
     position: relative;
     display: flex;
     align-items: center;
@@ -1014,7 +1036,8 @@
     padding: 0;
   }
   .mic:hover:not(:disabled),
-  .cap:hover:not(:disabled) {
+  .cap:hover:not(:disabled),
+  .sched:hover:not(:disabled) {
     color: #eee;
     background: rgba(255, 255, 255, 0.08);
   }
