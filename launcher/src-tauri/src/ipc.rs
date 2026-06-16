@@ -150,6 +150,7 @@ fn overlay_ui_fields(current: &Settings, incoming: &Settings) -> Settings {
         locale: incoming.locale.clone(),
         voice_hotkey: incoming.voice_hotkey.clone(),
         capture_hotkey: incoming.capture_hotkey.clone(),
+        schedule_hotkey: incoming.schedule_hotkey.clone(),
         system_prompt: incoming.system_prompt.clone(),
         announce_enabled: incoming.announce_enabled,
         announce_voice: incoming.announce_voice.clone(),
@@ -325,7 +326,7 @@ pub async fn capture_screenshot(app: AppHandle) -> Result<Option<String>, String
     let png = tauri::async_runtime::spawn_blocking(move || {
         std::thread::sleep(Duration::from_millis(150)); // 確保面板已隱藏再開遮罩
         trigger_screen_snip();
-        poll_new_clipboard_png(baseline, Duration::from_secs(60))
+        poll_new_clipboard_png(baseline, Duration::from_secs(30))
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -361,19 +362,82 @@ fn clipboard_image_fingerprint() -> Option<(usize, usize, u64)> {
     Some((img.width, img.height, fnv1a(&img.bytes)))
 }
 
-/// 輪詢剪貼簿,直到出現與 baseline 不同的影像(= 使用者框選完成)→ 轉 PNG bytes;逾時 → None。
+/// 輪詢剪貼簿等待框選完成(新影像)。同時偵測框選遮罩行程:遮罩開過又關閉、且 1.5 秒
+/// 寬限內仍無新圖 → 視為使用者取消,立即回 None(不必傻等整個 timeout)。timeout 為安全網。
 fn poll_new_clipboard_png(baseline: Option<(usize, usize, u64)>, timeout: std::time::Duration) -> Option<Vec<u8>> {
     let start = std::time::Instant::now();
+    let mut overlay_seen = false; // 是否曾偵測到遮罩行程(確認遮罩確實開過)
+    let mut closed_at: Option<std::time::Instant> = None; // 遮罩消失的時間點
     while start.elapsed() < timeout {
         std::thread::sleep(std::time::Duration::from_millis(400));
-        let Ok(mut cb) = arboard::Clipboard::new() else { continue };
-        let Ok(img) = cb.get_image() else { continue };
-        let fp = (img.width, img.height, fnv1a(&img.bytes));
-        if Some(fp) != baseline {
-            return rgba_to_png(img.width as u32, img.height as u32, &img.bytes);
+        // 1) 剪貼簿出現新圖 = 框選完成
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(img) = cb.get_image() {
+                let fp = (img.width, img.height, fnv1a(&img.bytes));
+                if Some(fp) != baseline {
+                    return rgba_to_png(img.width as u32, img.height as u32, &img.bytes);
+                }
+            }
+        }
+        // 2) 快速取消:遮罩開過、現在已關閉,寬限 1.5s 仍無新圖 → 取消
+        if snip_overlay_running() {
+            overlay_seen = true;
+            closed_at = None;
+        } else if overlay_seen {
+            match closed_at {
+                None => closed_at = Some(std::time::Instant::now()),
+                Some(t) if t.elapsed() >= std::time::Duration::from_millis(1500) => return None,
+                _ => {}
+            }
         }
     }
     None
+}
+
+/// 是否有 Windows 框選遮罩行程在執行。ms-screenclip 的遮罩在不同 Windows 版本由不同行程
+/// 承載,故比對一組候選名稱(小寫包含比對)。用來偵測遮罩關閉(取消或完成)。
+#[cfg(windows)]
+fn snip_overlay_running() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    const CANDIDATES: [&str; 3] = ["screenclippinghost", "snippingtool", "screensketch"];
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return false;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut found = false;
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..end]).to_lowercase();
+                if CANDIDATES.iter().any(|c| name.contains(c)) {
+                    found = true;
+                    break;
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+        found
+    }
+}
+
+#[cfg(not(windows))]
+fn snip_overlay_running() -> bool {
+    false
 }
 
 fn rgba_to_png(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
@@ -1838,6 +1902,7 @@ mod tests {
             locale: "en".into(),
             voice_hotkey: "Ctrl+Shift+M".into(),
             capture_hotkey: "Ctrl+Shift+S".into(),
+            schedule_hotkey: "Ctrl+Shift+L".into(),
             system_prompt: "自訂個性".into(),
             announce_enabled: false,
             announce_voice: "Microsoft HsiaoChen".into(),
@@ -1858,6 +1923,7 @@ mod tests {
         assert_eq!(merged.locale, "en", "locale 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.voice_hotkey, "Ctrl+Shift+M", "voice_hotkey 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.capture_hotkey, "Ctrl+Shift+S", "capture_hotkey 屬 UI 欄位,以 incoming 為準");
+        assert_eq!(merged.schedule_hotkey, "Ctrl+Shift+L", "schedule_hotkey 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.system_prompt, "自訂個性", "system_prompt 屬 UI 欄位,以 incoming 為準");
         assert!(!merged.announce_enabled, "announce_enabled 屬 UI 欄位,以 incoming 為準");
         assert_eq!(merged.announce_voice, "Microsoft HsiaoChen", "announce_voice 屬 UI 欄位,以 incoming 為準");

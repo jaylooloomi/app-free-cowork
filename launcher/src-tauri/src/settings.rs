@@ -30,6 +30,8 @@ pub struct Settings {
     pub voice_hotkey: String,
     /// 面板開著時啟動框選截圖的快捷鍵(預設 "Alt+K");同 voice_hotkey,前端解析比對。
     pub capture_hotkey: String,
+    /// 面板開著時切換「排程模式」的快捷鍵(預設 "Alt+L");同 voice_hotkey,前端比對 keydown。
+    pub schedule_hotkey: String,
     /// 自訂「助手個性」系統提示;留空 = 使用內建的「動手型助手」預設(依語言)。
     /// 進階使用者可改寫,改變 AI 的行事風格。
     pub system_prompt: String,
@@ -57,6 +59,7 @@ impl Default for Settings {
             locale: "zh-TW".into(),
             voice_hotkey: "Alt+J".into(),
             capture_hotkey: "Alt+K".into(),
+            schedule_hotkey: "Alt+L".into(),
             system_prompt: String::new(),
             announce_enabled: true,
             announce_voice: String::new(),
@@ -123,6 +126,7 @@ mod tests {
         assert_eq!(s.hotkey, "Alt+H");
         assert_eq!(s.voice_hotkey, "Alt+J");
         assert_eq!(s.capture_hotkey, "Alt+K");
+        assert_eq!(s.schedule_hotkey, "Alt+L");
         assert_eq!(s.model, "minimax-m2.5:cloud");
         assert!(!s.cautious_mode);
         assert!(s.background_mode, "預設背景模式:無終端機 + 串流回顯");

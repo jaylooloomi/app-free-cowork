@@ -55,6 +55,7 @@
         hotkey: snap.hotkey,
         voice_hotkey: snap.voice_hotkey,
         capture_hotkey: snap.capture_hotkey,
+        schedule_hotkey: snap.schedule_hotkey,
         model: snap.model,
         cautious_mode: snap.cautious_mode,
         background_mode: snap.background_mode,
@@ -112,6 +113,11 @@
       >{S.settingsCaptureHotkey}
       <input bind:value={s.capture_hotkey} placeholder={S.settingsCaptureHotkeyPlaceholder} />
       <small>{S.settingsCaptureHotkeyHint}</small></label
+    >
+    <label
+      >{S.settingsScheduleHotkey}
+      <input bind:value={s.schedule_hotkey} placeholder={S.settingsScheduleHotkeyPlaceholder} />
+      <small>{S.settingsScheduleHotkeyHint}</small></label
     >
     <label
       >{S.settingsModel}

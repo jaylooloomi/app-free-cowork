@@ -18,6 +18,8 @@ export interface Settings {
   voice_hotkey: string;
   /** 面板開著時啟動框選截圖的快捷鍵(預設 "Alt+K") */
   capture_hotkey: string;
+  /** 面板開著時切換排程模式的快捷鍵(預設 "Alt+L") */
+  schedule_hotkey: string;
   /** 自訂助手個性系統提示;留空 = 內建預設 */
   system_prompt: string;
   /** 任務完成時是否語音播報(玻璃 overlay + TTS) */

@@ -413,6 +413,11 @@
       if (!busy && !offline && !capturing) onCapture();
       return;
     }
+    if (matchesHotkey(e, settings?.schedule_hotkey || "Alt+L")) {
+      e.preventDefault();
+      scheduleMode = !scheduleMode;
+      return;
+    }
     if (e.key !== "Escape") return;
     if (dropdownOpen) {
       dropdownOpen = false;
