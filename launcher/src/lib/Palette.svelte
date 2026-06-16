@@ -50,7 +50,6 @@
   let recWeekday = $state(1); // Mon=1 .. Sun=7
   let runImmediately = $state(true);
   let schedules = $state<ScheduleDto[]>([]);
-  const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
 
   function buildRecurrence(): Recurrence {
     if (recKind === "every_minutes") return { kind: "every_minutes", minutes: recEvery };
@@ -59,11 +58,11 @@
     return { kind: "weekly_at", weekday: recWeekday, hour: recHour, minute: recMinute };
   }
   function recurrenceLabel(r: Recurrence): string {
-    if (r.kind === "every_minutes") return `每 ${r.minutes} 分鐘`;
-    if (r.kind === "every_hours") return `每 ${r.hours} 小時`;
+    if (r.kind === "every_minutes") return S.schedEveryMin(r.minutes);
+    if (r.kind === "every_hours") return S.schedEveryHour(r.hours);
     const hm = `${String(r.hour).padStart(2, "0")}:${String(r.minute).padStart(2, "0")}`;
-    if (r.kind === "daily_at") return `每天 ${hm}`;
-    return `每週${WEEKDAYS[(r.weekday - 1) % 7]} ${hm}`;
+    if (r.kind === "daily_at") return S.schedDailyAt(hm);
+    return S.schedWeeklyAt(S.schedWeekdays[(r.weekday - 1) % 7], hm);
   }
   async function loadSchedules() {
     try {
@@ -278,7 +277,7 @@
         input = "";
         attachments = [];
         hIndex = -1;
-        showTransient(settings?.locale === "en" ? "Scheduled ✓" : "已排程 ✓");
+        showTransient(S.scheduledToast);
         await loadSchedules();
         return; // finally 仍會跑(busy=false、focus)
       }
@@ -682,25 +681,25 @@
   {#if scheduleMode}
     <div class="sched-picker">
       <select bind:value={recKind}>
-        <option value="every_minutes">每 N 分鐘</option>
-        <option value="every_hours">每 N 小時</option>
-        <option value="daily_at">每天</option>
-        <option value="weekly_at">每週</option>
+        <option value="every_minutes">{S.schedKindMinutes}</option>
+        <option value="every_hours">{S.schedKindHours}</option>
+        <option value="daily_at">{S.schedKindDaily}</option>
+        <option value="weekly_at">{S.schedKindWeekly}</option>
       </select>
       {#if recKind === "every_minutes" || recKind === "every_hours"}
         <input type="number" min="1" bind:value={recEvery} class="sp-num" />
-        <span>{recKind === "every_minutes" ? "分鐘" : "小時"}</span>
+        <span>{recKind === "every_minutes" ? S.schedUnitMin : S.schedUnitHour}</span>
       {:else}
         {#if recKind === "weekly_at"}
           <select bind:value={recWeekday}>
-            {#each WEEKDAYS as w, i (i)}<option value={i + 1}>週{w}</option>{/each}
+            {#each S.schedWeekdays as w, i (i)}<option value={i + 1}>{S.schedWeekdayPrefix}{w}</option>{/each}
           </select>
         {/if}
         <input type="number" min="0" max="23" bind:value={recHour} class="sp-num" />
         <span>:</span>
         <input type="number" min="0" max="59" bind:value={recMinute} class="sp-num" />
       {/if}
-      <label class="sp-now"><input type="checkbox" bind:checked={runImmediately} /> 立即跑一次</label>
+      <label class="sp-now"><input type="checkbox" bind:checked={runImmediately} /> {S.schedRunNow}</label>
     </div>
   {/if}
   <div class="input-row">
@@ -764,8 +763,8 @@
       class:active={scheduleMode}
       onclick={() => (scheduleMode = !scheduleMode)}
       onmousedown={(e) => e.preventDefault()}
-      title="排程(週期性執行)"
-      aria-label="排程"
+      title={S.schedTooltip}
+      aria-label={S.schedTitle}
     >
       <svg
         viewBox="0 0 24 24"
@@ -812,14 +811,14 @@
 
   {#if schedules.length > 0 && !dropdownOpen}
     <div class="queue sched-list">
-      <div class="qsection">排程中</div>
+      <div class="qsection">{S.schedSection}</div>
       {#each schedules as s (s.id)}
         <div class="qrow" class:sched-off={!s.enabled}>
           <span class="qtext">{recurrenceLabel(s.recurrence)} · {truncate(s.prompt)}</span>
           <button class="link" onclick={() => api.setScheduleEnabled(s.id, !s.enabled).then(loadSchedules)}>
-            {s.enabled ? "暫停" : "啟用"}
+            {s.enabled ? S.schedPause : S.schedEnable}
           </button>
-          <button class="x" onclick={() => api.deleteSchedule(s.id).then(loadSchedules)} title="刪除排程" aria-label="刪除排程">✕</button>
+          <button class="x" onclick={() => api.deleteSchedule(s.id).then(loadSchedules)} title={S.schedDeleteTip} aria-label={S.schedDeleteTip}>✕</button>
         </div>
       {/each}
     </div>

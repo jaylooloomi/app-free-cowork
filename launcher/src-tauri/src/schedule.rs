@@ -1,6 +1,6 @@
 //! 週期性排程:週期模型、下次執行時間(純函式,單元測試核心)、schedules.json 持久化。
 
-use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike};
+use chrono::{DateTime, Datelike, Duration, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 
 /// 週期模型。具名欄位變體 → serde tag 模式序列化乾淨(`{"kind":"every_minutes","minutes":30}`),
@@ -99,6 +99,7 @@ pub fn save(path: &std::path::Path, list: &[Schedule]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike; // 測試用 .hour()/.minute()
 
     fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
