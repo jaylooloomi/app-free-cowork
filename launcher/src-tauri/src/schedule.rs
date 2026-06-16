@@ -50,6 +50,52 @@ fn local_at(now: DateTime<Local>, hour: u32, minute: u32) -> DateTime<Local> {
         .unwrap_or(now)
 }
 
+/// 一筆週期排程。`#[serde(default)]` 讓未來新增欄位時舊 schedules.json 仍可載入。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: u64,
+    pub prompt: String,
+    pub workdir: Option<String>,
+    pub recurrence: Recurrence,
+    #[serde(default)]
+    pub run_immediately: bool,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub next_run: i64, // unix 秒
+    #[serde(default)]
+    pub last_run: Option<i64>,
+}
+fn yes() -> bool {
+    true
+}
+
+/// 載入排程清單。檔案不存在 → 空;損毀 → 備份成 .bak 並回空(比照 settings 降級)。
+pub fn load(path: &std::path::Path) -> Vec<Schedule> {
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<Vec<Schedule>>(&s) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = std::fs::rename(path, path.with_extension("json.bak"));
+            Vec::new()
+        }
+    }
+}
+
+/// 原子寫入(.tmp → rename),比照 settings::save。
+pub fn save(path: &std::path::Path, list: &[Schedule]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(serde_json::to_string_pretty(list).unwrap().as_bytes())?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +154,38 @@ mod tests {
             next_run(&Recurrence::EveryMinutes { minutes: 0 }, dt(2026, 6, 16, 9, 0)),
             dt(2026, 6, 16, 9, 1)
         );
+    }
+
+    #[test]
+    fn save_then_load_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("schedules.json");
+        let list = vec![Schedule {
+            id: 1,
+            prompt: "整理桌面".into(),
+            workdir: None,
+            recurrence: Recurrence::DailyAt { hour: 9, minute: 0 },
+            run_immediately: true,
+            enabled: true,
+            next_run: 123,
+            last_run: None,
+        }];
+        save(&p, &list).unwrap();
+        assert_eq!(load(&p), list);
+    }
+
+    #[test]
+    fn load_missing_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load(&dir.path().join("nope.json")).is_empty());
+    }
+
+    #[test]
+    fn load_corrupt_returns_empty_and_backs_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("schedules.json");
+        std::fs::write(&p, "{bad").unwrap();
+        assert!(load(&p).is_empty());
+        assert!(p.with_extension("json.bak").exists());
     }
 }
