@@ -1,6 +1,6 @@
 [package]
 name = "launcher"
-version = "0.2.0"
+version = "0.2.1"
 description = "Hotkey launcher that runs Claude Code on free Ollama cloud models"
 authors = ["jaylooloomi"]
 edition = "2021"
